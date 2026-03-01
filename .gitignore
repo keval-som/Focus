@@ -91,3 +91,6 @@ coverage/
 *.temp
 .eslintcache
 .stylelintcache
+
+/backend/focus.db
+/backend/.venv
