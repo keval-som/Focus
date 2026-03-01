@@ -1,0 +1,131 @@
+/* ─────────────────────────────────────────────
+   Focus Assistant – Popup Styles
+   Minimal, clean, hackathon-ready design.
+   ───────────────────────────────────────────── */
+
+/* Reset & base */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: #0f0f13;
+  color: #e8e8f0;
+  width: 320px;         /* Fixed popup width enforced by Chrome */
+  min-height: 200px;
+}
+
+/* ── Container ── */
+.popup-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+}
+
+/* ── Header ── */
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid #2a2a38;
+  padding-bottom: 12px;
+}
+
+.popup-header .logo {
+  font-size: 22px;
+}
+
+.popup-header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #ffffff;
+}
+
+/* ── Body ── */
+.popup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #9898b0;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.goal-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #1a1a24;
+  border: 1px solid #2e2e40;
+  border-radius: 8px;
+  color: #e8e8f0;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.goal-input::placeholder {
+  color: #505068;
+}
+
+.goal-input:focus {
+  border-color: #6366f1; /* indigo accent */
+}
+
+/* ── Footer / Buttons ── */
+.popup-footer {
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  flex: 1;
+  padding: 9px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Primary – Start Session */
+.btn-primary {
+  background: #6366f1;
+  color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #4f51d9;
+}
+
+/* Secondary – End Session */
+.btn-secondary {
+  background: #1e1e2e;
+  color: #a0a0c0;
+  border: 1px solid #2e2e42;
+}
+
+.btn-secondary:hover {
+  background: #26263a;
+}

@@ -1,0 +1,93 @@
+# ========================
+# Dependencies
+# ========================
+node_modules/
+.pnp
+.pnp.js
+
+# ========================
+# Build Output
+# ========================
+dist/
+build/
+out/
+*.crx
+*.xpi
+*.zip
+
+# ========================
+# Environment & Secrets
+# ========================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+secrets.json
+
+# ========================
+# Logs
+# ========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ========================
+# Package Manager
+# ========================
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+.yarn/
+.pnp.*
+
+# ========================
+# OS & Editor
+# ========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ========================
+# IDE & Editor Config
+# ========================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+
+# ========================
+# Webpack & Babel Cache
+# ========================
+.cache/
+.parcel-cache/
+.webpack/
+*.tsbuildinfo
+
+# ========================
+# Test Coverage
+# ========================
+coverage/
+.nyc_output/
+*.lcov
+
+# ========================
+# Misc
+# ========================
+*.bak
+*.tmp
+*.temp
+.eslintcache
+.stylelintcache

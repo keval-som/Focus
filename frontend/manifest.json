@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Focus Assistant",
+  "version": "1.0.0",
+  "description": "An intentional browsing assistant that keeps you aligned with your goal.",
+
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "Focus Assistant"
+  },
+
+  "background": {
+    "service_worker": "background/background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_end"
+    }
+  ],
+
+  "icons": {}
+}
