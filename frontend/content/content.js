@@ -36,13 +36,15 @@
     timerEl.textContent = "⏱ 00:00";
   }
 
-  /** Start the per-tab timer — increments every second. */
+  const TICK_MS = (typeof FOCUS_CONFIG !== "undefined" && FOCUS_CONFIG.TIMER_TICK_MS) || 1000;
+
+  /** Start the per-tab timer — increments every TICK_MS. */
   function startTimer() {
     resetTimer();
     timerInterval = setInterval(() => {
       secondsOnTab += 1;
       timerEl.textContent = `⏱ ${fmt(secondsOnTab)}`;
-    }, 1000);
+    }, TICK_MS);
   }
 
   // ── DOM construction ───────────────────────────────────────
@@ -168,13 +170,31 @@
   }
 
   // ── 1. Read state immediately on page load ─────────────────
-  chrome.storage.local.get(["goal", "sessionActive"], applyState);
+  chrome.storage.local.get(["goal", "sessionActive", "lastNudge", "lastNudgeAt"], (data) => {
+    applyState(data);
+    const NUDGE_STALE_MS = 15000;
+    if (data.lastNudge && data.lastNudgeAt && (Date.now() - data.lastNudgeAt < NUDGE_STALE_MS)) {
+      chrome.runtime.sendMessage({ type: "AM_I_ACTIVE_TAB" }, (isActive) => {
+        if (isActive) showNudge(data.lastNudge.reason, { focus_score: data.lastNudge.focus_score, raw: data.lastNudge.confidence }, data.lastNudge.goal);
+      });
+    }
+  });
 
-  // ── 2. React to session start / end from the popup ─────────
-  // chrome.storage.onChanged fires on all tabs — no extra messaging needed.
-  chrome.storage.onChanged.addListener((_, area) => {
+  // ── 2. React to session start / end and to pending nudge ───
+  const NUDGE_STALE_MS = 15000;
+
+  chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     chrome.storage.local.get(["goal", "sessionActive"], applyState);
+
+    // Fallback: show nudge if it was stored while this tab wasn't ready for the message
+    const lastNudgeAt = changes.lastNudgeAt?.newValue;
+    const lastNudge = changes.lastNudge?.newValue;
+    if (lastNudgeAt && lastNudge && (Date.now() - lastNudgeAt < NUDGE_STALE_MS)) {
+      chrome.runtime.sendMessage({ type: "AM_I_ACTIVE_TAB" }, (isActive) => {
+        if (isActive) showNudge(lastNudge.reason, { focus_score: lastNudge.focus_score, raw: lastNudge.confidence }, lastNudge.goal);
+      });
+    }
   });
 
   // ── Page data extraction (privacy-safe) ───────────────────
@@ -295,84 +315,103 @@
     };
   }
 
-  // ── Nudge toast ────────────────────────────────────────────
+  // ── Nudge banner ───────────────────────────────────────────
 
-  let nudgeTimeout = null;
-
-  /** Show a dismissable distraction warning below the main bar. */
-  function showNudge(reason, confidence) {
-    // Remove any existing nudge first
+  /** Show a persistent distraction warning — stays until the user dismisses it. */
+  function showNudge(reason, confidence, goal) {
+    // Replace any existing nudge
     document.getElementById("fa-nudge")?.remove();
-    clearTimeout(nudgeTimeout);
 
-    const nudge = document.createElement("div");
-    nudge.id = "fa-nudge";
-    Object.assign(nudge.style, {
-      position:    "fixed",
-      top:         "45px",          // sits just below the main bar
-      left:        "0",
-      width:       "100%",
-      zIndex:      "2147483646",
-      display:     "flex",
-      alignItems:  "center",
-      gap:         "10px",
-      padding:     "8px 16px",
-      background:  "linear-gradient(90deg, #b45309, #d97706)",
-      color:       "#fff7ed",
-      fontFamily:  "'Segoe UI', system-ui, sans-serif",
-      fontSize:    "12px",
-      fontWeight:  "500",
-      boxShadow:   "0 2px 8px rgba(0,0,0,0.3)",
-      boxSizing:   "border-box",
-      animation:   "fa-slide-in 0.2s ease",
-    });
-
-    // Inject keyframe animation once
+    // Inject slide-in animation once
     if (!document.getElementById("fa-style")) {
       const style = document.createElement("style");
       style.id = "fa-style";
       style.textContent = `
         @keyframes fa-slide-in {
-          from { opacity: 0; transform: translateY(-6px); }
+          from { opacity: 0; transform: translateY(-8px); }
           to   { opacity: 1; transform: translateY(0); }
         }
       `;
       document.head.appendChild(style);
     }
 
-    const pct  = Math.round(confidence * 100);
+    const nudge = document.createElement("div");
+    nudge.id = "fa-nudge";
+    Object.assign(nudge.style, {
+      position:    "fixed",
+      top:         "45px",
+      left:        "0",
+      width:       "100%",
+      zIndex:      "2147483646",
+      display:     "flex",
+      alignItems:  "flex-start",
+      gap:         "12px",
+      padding:     "12px 16px",
+      background:  "linear-gradient(90deg, #92400e, #b45309)",
+      color:       "#fff7ed",
+      fontFamily:  "'Segoe UI', system-ui, sans-serif",
+      boxShadow:   "0 3px 10px rgba(0,0,0,0.35)",
+      boxSizing:   "border-box",
+      animation:   "fa-slide-in 0.25s ease",
+    });
+
+    // Icon
     const icon = document.createElement("span");
-    icon.textContent = "⚠️";
+    icon.textContent = "🔔";
+    Object.assign(icon.style, { fontSize: "18px", flexShrink: "0", marginTop: "1px" });
 
-    const text = document.createElement("span");
-    text.style.flex = "1";
-    text.textContent = `Distraction detected (${pct}% confidence) — ${reason}`;
+    // Message block
+    const msgBlock = document.createElement("div");
+    Object.assign(msgBlock.style, { flex: "1", display: "flex", flexDirection: "column", gap: "4px" });
 
+    const goalLine = document.createElement("div");
+    Object.assign(goalLine.style, { fontSize: "13px", fontWeight: "700", lineHeight: "1.4" });
+    goalLine.textContent = `You said your goal was: "${goal || "—"}"`;
+
+    const questionLine = document.createElement("div");
+    Object.assign(questionLine.style, { fontSize: "13px", fontWeight: "400", lineHeight: "1.4" });
+    questionLine.textContent = "Does this page support that goal?";
+
+    const reasonLine = document.createElement("div");
+    Object.assign(reasonLine.style, {
+      fontSize:   "11px",
+      fontWeight: "400",
+      opacity:    "0.75",
+      marginTop:  "4px",
+      lineHeight: "1.4",
+    });
+    const scoreLabel = (confidence?.focus_score !== undefined)
+      ? `Focus score: ${confidence.focus_score}/100`
+      : `${Math.round((confidence?.raw ?? 0) * 100)}% confidence`;
+    reasonLine.textContent = `${scoreLabel} · ${reason}`;
+
+    msgBlock.append(goalLine, questionLine, reasonLine);
+
+    // Dismiss button
     const close = document.createElement("button");
     close.textContent = "✕";
+    close.title = "Dismiss";
     Object.assign(close.style, {
       background:  "transparent",
       border:      "none",
-      color:       "#fff7ed",
-      fontSize:    "14px",
+      color:       "rgba(255,247,237,0.8)",
+      fontSize:    "15px",
       cursor:      "pointer",
       padding:     "0",
       lineHeight:  "1",
       flexShrink:  "0",
+      marginTop:   "2px",
     });
-    close.addEventListener("click", () => nudge.remove());
-
-    nudge.append(icon, text, close);
-    document.body.appendChild(nudge);
-
-    // Also tint the main bar orange to signal distraction state
-    bar.style.background = "linear-gradient(90deg, #92400e, #b45309)";
-
-    // Auto-dismiss after 8 seconds
-    nudgeTimeout = setTimeout(() => {
+    close.addEventListener("click", () => {
       nudge.remove();
       bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
-    }, 8000);
+    });
+
+    nudge.append(icon, msgBlock, close);
+    document.body.appendChild(nudge);
+
+    // Tint the main bar orange while nudge is visible
+    bar.style.background = "linear-gradient(90deg, #92400e, #b45309)";
   }
 
   // ── 3. React to messages from the background ───────────────
@@ -380,16 +419,25 @@
 
     // TAB_CHANGED — update the bar goal text and reset the timer
     if (message.type === "TAB_CHANGED") {
-      goalEl.textContent = `🎯 Goal: ${message.goal ?? "—"}`;
-      // Clear any nudge when switching tabs
+      applyState({ goal: message.goal, sessionActive: true });
       document.getElementById("fa-nudge")?.remove();
       bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
-      startTimer();
+    }
+
+    // SESSION_ENDED — reset the bar on all tabs immediately
+    if (message.type === "SESSION_ENDED") {
+      applyState({ goal: "", sessionActive: false });
+      document.getElementById("fa-nudge")?.remove();
+      bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
     }
 
     // NUDGE — AI says this page doesn't align with the goal
     if (message.type === "NUDGE") {
-      showNudge(message.reason, message.confidence ?? 0);
+      showNudge(
+        message.reason,
+        { focus_score: message.focus_score, raw: message.confidence ?? 0 },
+        message.goal
+      );
     }
 
     // EXTRACT_PAGE_DATA — scrape this page and send privacy-safe data to background

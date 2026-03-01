@@ -1,204 +1,276 @@
 // ─────────────────────────────────────────────────────────────
 // Focus Assistant – Background Service Worker (Manifest V3)
 //
-// Stage 3 + 5 + 6: Tab Tracking, Page Extraction & AI Analysis
+// Stage 3 + 5 + 6 (Batch): Tab Tracking, Page Extraction & AI Batch Analysis
 //
-// Responsibilities:
-//   • Receive START_SESSION / END_SESSION messages from the popup
-//   • Track time spent per tab during an active session
-//   • Notify content scripts when the active tab changes
-//   • Extract page data and send to backend for AI alignment check
-//   • Send NUDGE to content script when user is off-track
+// Flow:
+//   Tab switch → /session/log   (fast, no LLM, stores raw visit)
+//   Every N min → /session/analyze_batch  (LLM analyzes window of activity)
+//   Batch result → NUDGE sent to active tab if is_on_track === false
 // ─────────────────────────────────────────────────────────────
+
+importScripts("../config.js");
 
 const API_BASE      = "http://localhost:8000/api/v1";
 const EXTENSION_KEY = "hackathon-focus-123";
+const BATCH_ALARM   = "focus-batch-analyze";
 
 const apiHeaders = {
   "Content-Type":    "application/json",
   "X-Extension-Key": EXTENSION_KEY,
 };
 
-/* ── In-memory session state ──────────────────────────────────
-   Service workers can be suspended by Chrome between events.
-   For MVP, in-memory state is sufficient; for production,
-   persist to chrome.storage.session (survives SW restarts). */
+// ── In-memory session state ────────────────────────────────────
+// Service workers can be suspended by Chrome between events.
+// Critical fields are also mirrored to chrome.storage.local for re-hydration.
 let session = {
-  sessionActive:      false,
-  goal:               "",
-  currentTabId:       null,
-  currentTabStartTime: 0,   // timestamp (ms) when current tab became active
-  alignedTime:        0,    // ms spent on "aligned" tabs (future: AI classified)
-  totalTime:          0,    // ms of total tracked tab time this session
-  driftCount:         0,    // number of tab switches during session
+  sessionActive:       false,
+  goal:                "",
+  currentTabId:        null,
+  currentTabStartTime: 0,
+  totalTime:           0,
+  driftCount:          0,
+  currentPage:         null,  // { url, title, snippet } of the tab being timed
 };
 
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// Anti-bot page detection
 // ─────────────────────────────────────────────────────────────
 
-/* Calculate time elapsed on the previous tab and add it to totalTime. */
+const ANTI_BOT_TITLE_PATTERNS = [
+  "just a moment", "checking your browser", "please wait",
+  "attention required", "access denied", "security check",
+  "ddos protection", "verify you are human", "enable javascript",
+  "bot check", "one more step", "request blocked",
+];
+
+const ANTI_BOT_URL_PATTERNS = [
+  "/cdn-cgi/", "challenge.cloudflare.com", "/akamai-challenge",
+];
+
+function isAntiBotPage({ url = "", title = "", snippet = "" }) {
+  const lt = title.toLowerCase();
+  const lu = url.toLowerCase();
+  const ls = snippet.toLowerCase();
+  if (ANTI_BOT_TITLE_PATTERNS.some(p => lt.includes(p))) return true;
+  if (ANTI_BOT_URL_PATTERNS.some(p => lu.includes(p)))   return true;
+  if (ls.length < 120 && (lt.includes("check") || lt.includes("verif"))) return true;
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tab timing helpers
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Close timing on the previous tab.
+ * Logs the visit to the backend with the actual time spent,
+ * then returns the elapsed ms so callers can update totalTime.
+ */
 function closePreviousTab() {
   if (session.currentTabId === null || session.currentTabStartTime === 0) return;
 
-  const elapsed = Date.now() - session.currentTabStartTime;
-  session.totalTime += elapsed;
+  const elapsed         = Date.now() - session.currentTabStartTime;
+  const durationSeconds = Math.round(elapsed / 1000);
+  session.totalTime    += elapsed;
 
   console.log(
-    `[Focus] Tab closed — tabId: ${session.currentTabId} | elapsed: ${(elapsed / 1000).toFixed(1)}s | totalTime: ${(session.totalTime / 1000).toFixed(1)}s`
+    `[Focus] Tab closed — tabId: ${session.currentTabId} | elapsed: ${durationSeconds}s | totalTime: ${(session.totalTime / 1000).toFixed(1)}s`
   );
+
+  // Log the visit with the real duration if we captured the page data
+  if (session.currentPage && durationSeconds > 0) {
+    const page = session.currentPage;
+    chrome.storage.local.get(["sessionId", "sessionActive"], ({ sessionId, sessionActive }) => {
+      if (!sessionId || !sessionActive) return;
+      logVisit({ sessionId, ...page, durationSeconds });
+    });
+  }
 }
 
-/* Begin timing a new tab, notify its content script, and request page data. */
+/** Start timing a new tab, notify its content script, and extract page data. */
 function openNewTab(tabId) {
   session.currentTabId        = tabId;
   session.currentTabStartTime = Date.now();
+  session.currentPage         = null; // cleared until extraction completes
   session.driftCount         += 1;
 
   console.log(`[Focus] Tab opened — tabId: ${tabId} | goal: "${session.goal}"`);
 
-  // Notify content script so it resets its timer and updates goal text
+  // Update the floating bar on the new tab
   chrome.tabs.sendMessage(tabId, {
     type: "TAB_CHANGED",
     goal: session.goal,
   }).catch(() => {});
 
-  requestAnalysis(tabId);
-}
-
-// Lowercase title substrings that reliably identify bot-challenge / access-denied
-// interstitial pages. These pages contain no real content worth classifying and
-// must never be cached — the actual destination page will load momentarily.
-const ANTI_BOT_TITLE_PATTERNS = [
-  "just a moment",           // Cloudflare challenge
-  "checking your browser",   // Cloudflare / generic
-  "please wait",             // generic waiting screens
-  "attention required",      // Cloudflare attention page
-  "access denied",           // WAF / firewall blocks
-  "security check",          // various WAFs
-  "ddos protection",         // DDoS guard
-  "verify you are human",    // CAPTCHA gates
-  "enable javascript",       // JS-required interstitial
-  "bot check",               // generic bot checks
-  "one more step",           // Google reCAPTCHA gateway
-  "request blocked",         // Akamai / CDN blocks
-];
-
-// Substrings matched against the full URL (lowercase) for CDN challenge paths
-// that appear before the real page loads.
-const ANTI_BOT_URL_PATTERNS = [
-  "/cdn-cgi/",               // Cloudflare challenge path
-  "challenge.cloudflare.com",
-  "/akamai-challenge",
-];
-
-/**
- * Returns true when the page looks like a transient bot-challenge or
- * access-denied interstitial rather than real content.
- * Skipping these pages prevents a wrong "not aligned" verdict from being
- * written to the cache and haunting the real page on the next visit.
- */
-function isAntiBotPage({ url = "", title = "", snippet = "" }) {
-  const lowerTitle   = title.toLowerCase();
-  const lowerUrl     = url.toLowerCase();
-  const lowerSnippet = snippet.toLowerCase();
-
-  if (ANTI_BOT_TITLE_PATTERNS.some(p => lowerTitle.includes(p)))   return true;
-  if (ANTI_BOT_URL_PATTERNS.some(p => lowerUrl.includes(p)))       return true;
-
-  // Extra signal: very short snippet + title that mentions "checking" / "verif"
-  // catches challenge pages whose titles we haven't enumerated yet.
-  if (lowerSnippet.length < 120 &&
-      (lowerTitle.includes("check") || lowerTitle.includes("verif"))) return true;
-
-  return false;
+  // Extract page data and store it for logging when this tab is left
+  extractAndStore(tabId);
 }
 
 /**
- * Extract page data from a tab and send it to the backend for AI analysis.
- * Separated from openNewTab so we can trigger analysis on session start
- * without also sending a TAB_CHANGED (which resets the bar unnecessarily).
+ * Send EXTRACT_PAGE_DATA to a tab and store the result in session.currentPage.
+ * Used both on tab switch (via openNewTab) and on session start.
  */
-function requestAnalysis(tabId) {
+function extractAndStore(tabId) {
   chrome.tabs.sendMessage(tabId, { type: "EXTRACT_PAGE_DATA" }, (response) => {
-    void chrome.runtime.lastError; // suppress "no receiver" for restricted tabs
+    void chrome.runtime.lastError;
 
     if (!response?.data) return;
-
     const { url, title, snippet } = response.data;
     if (!url) return;
 
-    // Skip bot-challenge / access-denied interstitials before hitting the backend.
-    // These pages are transient — caching their verdict would permanently flag
-    // the real destination URL for the rest of the session.
     if (isAntiBotPage({ url, title, snippet })) {
-      console.log(`[Focus] Anti-bot page detected — skipping analysis. title: "${title}" | url: ${url}`);
+      console.log(`[Focus] Anti-bot page — skipping. title: "${title}"`);
       return;
     }
 
-    // Always read from storage — SW may have restarted since session was created
-    chrome.storage.local.get(["sessionId", "sessionActive"], ({ sessionId, sessionActive }) => {
-      if (!sessionId || !sessionActive) return;
-      analyzeWithAI({ sessionId, url, title, snippet, tabId });
-    });
+    // Store so closePreviousTab can log it with the real duration later
+    session.currentPage = { url, title, snippet };
+    console.log(`[Focus] Page data captured: "${title}"`);
   });
 }
 
-/* Persist session counters + currentTabId to storage.
-   currentTabId must be persisted so onUpdated can check it after a SW restart. */
+// ─────────────────────────────────────────────────────────────
+// Backend API calls
+// ─────────────────────────────────────────────────────────────
+
+/** POST /session/log — fast, no LLM, records one tab visit. */
+async function logVisit({ sessionId, url, title, snippet, durationSeconds }) {
+  try {
+    const res = await fetch(`${API_BASE}/session/log`, {
+      method:  "POST",
+      headers: apiHeaders,
+      body:    JSON.stringify({
+        session_id:       sessionId,
+        url,
+        title,
+        snippet,
+        duration_seconds: durationSeconds,
+      }),
+    });
+    if (res.ok) {
+      console.log(`[Focus] Logged: "${title}" | ${durationSeconds}s`);
+    } else {
+      console.warn(`[Focus] Log API error: ${res.status}`);
+    }
+  } catch (err) {
+    console.warn("[Focus] logVisit failed:", err.message);
+  }
+}
+
+/** POST /session/analyze_batch — LLM analyzes last 4 min of activity. */
+async function runBatchAnalysis() {
+  chrome.storage.local.get(["sessionId", "sessionActive", "goal"], async (stored) => {
+    const { sessionId, sessionActive, goal } = stored || {};
+    if (!sessionActive || !sessionId) return;
+
+    try {
+      console.log("[Focus] Running batch analysis…");
+
+      const res = await fetch(`${API_BASE}/session/analyze_batch`, {
+        method:  "POST",
+        headers: apiHeaders,
+        body:    JSON.stringify({ session_id: sessionId }),
+      });
+
+      if (!res.ok) {
+        console.warn(`[Focus] Batch API error: ${res.status}`);
+        return;
+      }
+
+      const { focus_score, is_on_track, coaching_nudge, url_breakdown } = await res.json();
+
+      console.log(
+        `[Focus] Batch result — score: ${focus_score} | on_track: ${is_on_track}\n  Nudge: ${coaching_nudge}`
+      );
+
+      // Persist latest score so popup can display it
+      chrome.storage.local.set({ focusScore: focus_score, isOnTrack: is_on_track });
+
+      // Nudge the user if they're off track
+      if (!is_on_track) {
+        const nudgeData = {
+          reason:      coaching_nudge,
+          confidence:  parseFloat(((100 - focus_score) / 100).toFixed(2)),
+          focus_score,
+          goal:        goal ?? "",
+        };
+        // Fallback: store so content script can show nudge if message arrived before script was ready
+        chrome.storage.local.set({
+          lastNudge:   nudgeData,
+          lastNudgeAt: Date.now(),
+        });
+
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+          if (!tab?.id) {
+            console.warn("[Focus] No active tab for nudge.");
+            return;
+          }
+          chrome.tabs.sendMessage(tab.id, {
+            type: "NUDGE",
+            ...nudgeData,
+          }).catch((err) => {
+            console.warn("[Focus] Nudge delivery failed (tab may not have content script):", err?.message || String(err));
+          });
+        });
+      }
+
+    } catch (err) {
+      console.warn("[Focus] runBatchAnalysis failed:", err.message);
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Broadcast to all tabs
+// ─────────────────────────────────────────────────────────────
+
+/** Send a message to every tab that has a content script. Errors are silently ignored. */
+function broadcastToAllTabs(msg) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id) chrome.tabs.sendMessage(tab.id, msg).catch(() => {});
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Persist / re-hydrate state
+// ─────────────────────────────────────────────────────────────
+
 function flushToStorage() {
   chrome.storage.local.set({
     totalTime:    session.totalTime,
-    alignedTime:  session.alignedTime,
     driftCount:   session.driftCount,
     currentTabId: session.currentTabId,
   });
 }
 
-/**
- * Call the backend /analyze endpoint with extracted page data.
- * If the AI says the page is NOT aligned, send a NUDGE to the content script.
- */
-async function analyzeWithAI({ sessionId, url, title, snippet, tabId }) {
-  try {
-    console.log(`[Focus] Analyzing: "${title}" | url: ${url}`);
+// ─────────────────────────────────────────────────────────────
+// chrome.alarms — survives SW suspension (unlike setInterval)
+// ─────────────────────────────────────────────────────────────
 
-    const res = await fetch(`${API_BASE}/session/analyze`, {
-      method:  "POST",
-      headers: apiHeaders,
-      body:    JSON.stringify({ session_id: sessionId, url, title, snippet }),
-    });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === BATCH_ALARM) runBatchAnalysis();
+});
 
-    if (!res.ok) {
-      console.warn(`[Focus] Analyze API error: ${res.status}`);
+// ─────────────────────────────────────────────────────────────
+// Message handler — popup commands
+// ─────────────────────────────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  if (message.type === "AM_I_ACTIVE_TAB") {
+    const tabId = sender.tab?.id;
+    if (tabId == null) {
+      sendResponse(false);
       return;
     }
-
-    const { aligned, confidence, reason, cached } = await res.json();
-
-    console.log(
-      `[Focus] AI result — aligned: ${aligned} | confidence: ${(confidence * 100).toFixed(0)}% | cached: ${cached}\n  Reason: ${reason}`
-    );
-
-    if (!aligned) {
-      // Send a nudge to the content script on this tab
-      chrome.tabs.sendMessage(tabId, {
-        type:       "NUDGE",
-        reason,
-        confidence,
-        goal:       session.goal,
-      }).catch(() => {}); // tab may have navigated away
-    }
-
-  } catch (err) {
-    console.warn("[Focus] analyzeWithAI failed:", err.message);
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+      sendResponse(tab?.id === tabId);
+    });
+    return true;
   }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Message handler — receives commands from the popup
-// ─────────────────────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "START_SESSION") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
@@ -207,38 +279,50 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         goal:                message.goal ?? "",
         currentTabId:        tab?.id ?? null,
         currentTabStartTime: Date.now(),
-        alignedTime:         0,
         totalTime:           0,
         driftCount:          0,
+        currentPage:         null,
       };
 
       console.log(`[Focus] Session started — goal: "${session.goal}" | tabId: ${session.currentTabId}`);
       flushToStorage();
       sendResponse({ ok: true });
 
-      // Analyze the tab the user is already on immediately.
-      // Use requestAnalysis (not openNewTab) to avoid sending TAB_CHANGED —
-      // the bar already updates via chrome.storage.onChanged in content.js.
-      if (tab?.id) requestAnalysis(tab.id);
+      // Broadcast goal to ALL open tabs immediately — don't rely on storage.onChanged
+      broadcastToAllTabs({ type: "TAB_CHANGED", goal: session.goal });
+
+      // Extract current tab data immediately (logged when user switches away)
+      if (tab?.id) extractAndStore(tab.id);
+
+      const batchMins = (typeof FOCUS_CONFIG !== "undefined" && FOCUS_CONFIG.BATCH_ANALYSIS_MINUTES) || 4;
+      chrome.alarms.create(BATCH_ALARM, { periodInMinutes: batchMins });
+      console.log(`[Focus] Batch alarm scheduled every ${batchMins} minutes.`);
     });
 
-    return true; // keep message channel open for async sendResponse
+    return true; // keep channel open for async sendResponse
   }
 
   if (message.type === "END_SESSION") {
+    // Log the final tab before resetting
     if (session.sessionActive) {
-      closePreviousTab();         // account for time on the last tab
+      closePreviousTab();
       flushToStorage();
     }
+
+    // Cancel the batch alarm
+    chrome.alarms.clear(BATCH_ALARM);
+
+    // Reset all open tabs immediately
+    broadcastToAllTabs({ type: "SESSION_ENDED" });
 
     session = {
       sessionActive:       false,
       goal:                "",
       currentTabId:        null,
       currentTabStartTime: 0,
-      alignedTime:         0,
       totalTime:           0,
       driftCount:          0,
+      currentPage:         null,
     };
 
     console.log("[Focus] Session ended.");
@@ -253,12 +337,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 /* User switches to a different tab. */
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  // Always read sessionActive from storage — the service worker can be
-  // suspended between events and in-memory `session` state is lost on wake-up.
   chrome.storage.local.get(["sessionActive", "goal", "sessionId"], (data) => {
     if (!data.sessionActive) return;
 
-    // Re-hydrate in-memory state if the SW was just woken up
+    // Re-hydrate if SW was suspended
     if (!session.sessionActive) {
       session.sessionActive = true;
       session.goal          = data.goal || "";
@@ -270,22 +352,21 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   });
 });
 
-/* A tab finishes loading a new URL (navigation within same tab). */
+/* Navigation within the same tab (e.g. YouTube video change, SPA route). */
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "complete") return;
 
-  // Read ALL persisted state — currentTabId included — so SW restarts don't break us
   chrome.storage.local.get(["sessionActive", "goal", "currentTabId"], (data) => {
     if (!data.sessionActive) return;
 
-    // Re-hydrate full in-memory state if SW was just woken up
+    // Re-hydrate if SW was suspended
     if (!session.sessionActive) {
       session.sessionActive = true;
       session.goal          = data.goal        || "";
       session.currentTabId  = data.currentTabId || null;
     }
 
-    // Only re-analyze if this is the tab the user is actually on
+    // Only react to the tab the user is actually on
     if (tabId !== session.currentTabId) return;
 
     closePreviousTab();

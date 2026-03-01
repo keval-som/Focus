@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
+from config import BATCH_ANALYSIS_MINUTES
 from database import (
     init_db,
     create_session,
@@ -231,8 +232,8 @@ async def analyze_batch(
             detail="Session not found or inactive. Please start a new session."
         )
     
-    # Step 2: Fetch recent activity (last 4 minutes)
-    recent_logs = get_recent_logs(request.session_id, minutes=4)
+    # Step 2: Fetch recent activity
+    recent_logs = get_recent_logs(request.session_id, minutes=BATCH_ANALYSIS_MINUTES)
     
     if not recent_logs:
         # No recent activity - return default response

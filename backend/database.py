@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import os
 
+from config import BATCH_ANALYSIS_MINUTES
+
 # Database file path - stored in the project root
 DB_PATH = os.path.join(os.path.dirname(__file__), "focus.db")
 
@@ -245,16 +247,16 @@ def log_tab_visit(
         conn.close()
 
 
-def get_recent_logs(session_id: str, minutes: int = 4) -> list:
+def get_recent_logs(session_id: str, minutes: int = None) -> list:
     """
     Retrieves all logs for a session from the last N minutes.
-    
+
     This function is used for batch processing to get recent browsing activity
     that needs to be analyzed together for better context.
-    
+
     Args:
         session_id: The UUID of the session
-        minutes: Number of minutes to look back (default: 4)
+        minutes: Number of minutes to look back (default from config)
     
     Returns:
         list: List of dictionaries, each containing log data with keys:
@@ -263,9 +265,12 @@ def get_recent_logs(session_id: str, minutes: int = 4) -> list:
     Raises:
         sqlite3.Error: If database operation fails
     """
+    if minutes is None:
+        minutes = BATCH_ANALYSIS_MINUTES
+
     conn = get_connection()
     cursor = conn.cursor()
-    
+
     try:
         # Calculate the timestamp for N minutes ago
         cutoff_time = datetime.now() - timedelta(minutes=minutes)

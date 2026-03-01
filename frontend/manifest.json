@@ -7,7 +7,8 @@
   "permissions": [
     "activeTab",
     "storage",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
 
   "action": {
@@ -22,7 +23,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content/content.js"],
+      "js": ["config.js","content/content.js"],
       "run_at": "document_end"
     }
   ],
