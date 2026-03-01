@@ -1,19 +1,23 @@
 // ─────────────────────────────────────────────────────────────
 // Focus Assistant – Background Service Worker (Manifest V3)
 //
-// Stage 3 + 5: Tab Tracking & Page Data Extraction
+// Stage 3 + 5 + 6: Tab Tracking, Page Extraction & AI Analysis
 //
 // Responsibilities:
 //   • Receive START_SESSION / END_SESSION messages from the popup
 //   • Track time spent per tab during an active session
 //   • Notify content scripts when the active tab changes
-//   • Request page data from content script on tab change
-//   • Build and log an AI-ready payload from extracted page data
-//
-// Future expansions:
-//   • Send payload to AI API for goal-alignment scoring
-//   • Send nudge to content script when user is off-track
+//   • Extract page data and send to backend for AI alignment check
+//   • Send NUDGE to content script when user is off-track
 // ─────────────────────────────────────────────────────────────
+
+const API_BASE      = "http://localhost:8000/api/v1";
+const EXTENSION_KEY = "hackathon-focus-123";
+
+const apiHeaders = {
+  "Content-Type":    "application/json",
+  "X-Extension-Key": EXTENSION_KEY,
+};
 
 /* ── In-memory session state ──────────────────────────────────
    Service workers can be suspended by Chrome between events.
@@ -53,44 +57,86 @@ function openNewTab(tabId) {
 
   console.log(`[Focus] Tab opened — tabId: ${tabId} | goal: "${session.goal}"`);
 
-  // Send TAB_CHANGED directly — no chrome.tabs.get wrapper needed.
-  // chrome:// and other restricted pages simply have no content script,
-  // so the message fails silently via .catch().
+  // Notify content script so it resets its timer and updates goal text
   chrome.tabs.sendMessage(tabId, {
     type: "TAB_CHANGED",
     goal: session.goal,
   }).catch(() => {});
 
-  // Request page data extraction; callback handles both success and failure.
+  requestAnalysis(tabId);
+}
+
+/**
+ * Extract page data from a tab and send it to the backend for AI analysis.
+ * Separated from openNewTab so we can trigger analysis on session start
+ * without also sending a TAB_CHANGED (which resets the bar unnecessarily).
+ */
+function requestAnalysis(tabId) {
   chrome.tabs.sendMessage(tabId, { type: "EXTRACT_PAGE_DATA" }, (response) => {
-    // Suppress the "no receiver" error for tabs without a content script
-    void chrome.runtime.lastError;
+    void chrome.runtime.lastError; // suppress "no receiver" for restricted tabs
 
-    if (!response) return;
+    if (!response?.data) return;
 
-    const { url, title, snippet } = response.data ?? {};
+    const { url, title, snippet } = response.data;
+    if (!url) return;
 
-    const aiPayload = {
-      goal:      session.goal,
-      url,
-      title,
-      snippet,
-      timeSpent: Math.round(session.totalTime / 1000), // ms → seconds
-    };
-
-    console.log("[Focus] AI payload ready:", aiPayload);
-
-    // TODO (Stage 6): POST aiPayload to AI alignment API
+    // Always read from storage — SW may have restarted since session was created
+    chrome.storage.local.get(["sessionId", "sessionActive"], ({ sessionId, sessionActive }) => {
+      if (!sessionId || !sessionActive) return;
+      analyzeWithAI({ sessionId, url, title, snippet, tabId });
+    });
   });
 }
 
-/* Persist key counters back to chrome.storage so the popup can read them. */
+/* Persist session counters + currentTabId to storage.
+   currentTabId must be persisted so onUpdated can check it after a SW restart. */
 function flushToStorage() {
   chrome.storage.local.set({
-    totalTime:   session.totalTime,
-    alignedTime: session.alignedTime,
-    driftCount:  session.driftCount,
+    totalTime:    session.totalTime,
+    alignedTime:  session.alignedTime,
+    driftCount:   session.driftCount,
+    currentTabId: session.currentTabId,
   });
+}
+
+/**
+ * Call the backend /analyze endpoint with extracted page data.
+ * If the AI says the page is NOT aligned, send a NUDGE to the content script.
+ */
+async function analyzeWithAI({ sessionId, url, title, snippet, tabId }) {
+  try {
+    console.log(`[Focus] Analyzing: "${title}" | url: ${url}`);
+
+    const res = await fetch(`${API_BASE}/session/analyze`, {
+      method:  "POST",
+      headers: apiHeaders,
+      body:    JSON.stringify({ session_id: sessionId, url, title, snippet }),
+    });
+
+    if (!res.ok) {
+      console.warn(`[Focus] Analyze API error: ${res.status}`);
+      return;
+    }
+
+    const { aligned, confidence, reason, cached } = await res.json();
+
+    console.log(
+      `[Focus] AI result — aligned: ${aligned} | confidence: ${(confidence * 100).toFixed(0)}% | cached: ${cached}\n  Reason: ${reason}`
+    );
+
+    if (!aligned) {
+      // Send a nudge to the content script on this tab
+      chrome.tabs.sendMessage(tabId, {
+        type:       "NUDGE",
+        reason,
+        confidence,
+        goal:       session.goal,
+      }).catch(() => {}); // tab may have navigated away
+    }
+
+  } catch (err) {
+    console.warn("[Focus] analyzeWithAI failed:", err.message);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -99,7 +145,6 @@ function flushToStorage() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "START_SESSION") {
-    // Query the currently active tab so we can start timing it immediately
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       session = {
         sessionActive:       true,
@@ -114,6 +159,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       console.log(`[Focus] Session started — goal: "${session.goal}" | tabId: ${session.currentTabId}`);
       flushToStorage();
       sendResponse({ ok: true });
+
+      // Analyze the tab the user is already on immediately.
+      // Use requestAnalysis (not openNewTab) to avoid sending TAB_CHANGED —
+      // the bar already updates via chrome.storage.onChanged in content.js.
+      if (tab?.id) requestAnalysis(tab.id);
     });
 
     return true; // keep message channel open for async sendResponse
@@ -147,22 +197,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 /* User switches to a different tab. */
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  if (!session.sessionActive) return;
+  // Always read sessionActive from storage — the service worker can be
+  // suspended between events and in-memory `session` state is lost on wake-up.
+  chrome.storage.local.get(["sessionActive", "goal", "sessionId"], (data) => {
+    if (!data.sessionActive) return;
 
-  closePreviousTab();
-  openNewTab(tabId);
-  flushToStorage();
+    // Re-hydrate in-memory state if the SW was just woken up
+    if (!session.sessionActive) {
+      session.sessionActive = true;
+      session.goal          = data.goal || "";
+    }
+
+    closePreviousTab();
+    openNewTab(tabId);
+    flushToStorage();
+  });
 });
 
 /* A tab finishes loading a new URL (navigation within same tab). */
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (!session.sessionActive)          return;
   if (changeInfo.status !== "complete") return;
-  if (tabId !== session.currentTabId)   return; // only care about the active tab
 
-  // Treat an in-tab navigation as a "new" tab event — reset the timer
-  // so we measure time on this specific URL, not the tab's total lifetime.
-  closePreviousTab();
-  openNewTab(tabId);
-  flushToStorage();
+  // Read ALL persisted state — currentTabId included — so SW restarts don't break us
+  chrome.storage.local.get(["sessionActive", "goal", "currentTabId"], (data) => {
+    if (!data.sessionActive) return;
+
+    // Re-hydrate full in-memory state if SW was just woken up
+    if (!session.sessionActive) {
+      session.sessionActive = true;
+      session.goal          = data.goal        || "";
+      session.currentTabId  = data.currentTabId || null;
+    }
+
+    // Only re-analyze if this is the tab the user is actually on
+    if (tabId !== session.currentTabId) return;
+
+    closePreviousTab();
+    openNewTab(tabId);
+    flushToStorage();
+  });
 });
