@@ -566,52 +566,27 @@
 
     msgBlock.append(goalLine, questionLine, reasonLine);
 
-    function dismissNudge() {
+    // Dismiss button
+    const close = document.createElement("button");
+    close.textContent = "✕";
+    close.title = "Dismiss";
+    Object.assign(close.style, {
+      background:  "transparent",
+      border:      "none",
+      color:       "rgba(255,247,237,0.8)",
+      fontSize:    "15px",
+      cursor:      "pointer",
+      padding:     "0",
+      lineHeight:  "1",
+      flexShrink:  "0",
+      marginTop:   "2px",
+    });
+    close.addEventListener("click", () => {
       nudge.remove();
       bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
-    }
-
-    const btnStyle = {
-      padding:      "6px 14px",
-      borderRadius: "6px",
-      border:        "none",
-      fontSize:     "12px",
-      fontWeight:   "600",
-      cursor:       "pointer",
-      flexShrink:  "0",
-      fontFamily:   "inherit",
-    };
-
-    const refocusBtn = document.createElement("button");
-    refocusBtn.textContent = "Refocus on goal";
-    Object.assign(refocusBtn.style, {
-      ...btnStyle,
-      background: "#fff7ed",
-      color:      "#92400e",
     });
-    refocusBtn.addEventListener("click", () => dismissNudge());
 
-    const stayBtn = document.createElement("button");
-    stayBtn.textContent = "Stay here";
-    Object.assign(stayBtn.style, {
-      ...btnStyle,
-      background: "rgba(255,247,237,0.2)",
-      color:      "#fff7ed",
-      border:     "1px solid rgba(255,247,237,0.5)",
-    });
-    stayBtn.addEventListener("click", () => dismissNudge());
-
-    const actions = document.createElement("div");
-    Object.assign(actions.style, {
-      display:        "flex",
-      alignItems:     "center",
-      gap:            "10px",
-      flexShrink:     "0",
-      marginTop:      "2px",
-    });
-    actions.append(refocusBtn, stayBtn);
-
-    nudge.append(icon, msgBlock, actions);
+    nudge.append(icon, msgBlock, close);
     document.body.appendChild(nudge);
 
     // Tint the main bar orange while nudge is visible
