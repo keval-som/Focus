@@ -1,11 +1,20 @@
 import React, { useState, useEffect } from "react";
 
 const BACKEND_URL = "http://localhost:8000";
+const API_BASE = `${BACKEND_URL}/api/v1`;
+const EXTENSION_KEY = "hackathon-focus-123";
+
+const apiHeaders = {
+  "Content-Type": "application/json",
+  "X-Extension-Key": EXTENSION_KEY,
+};
 
 export default function App() {
   const [goal, setGoal] = useState("");
   const [sessionActive, setSessionActive] = useState(false);
   const [savedGoal, setSavedGoal] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [backendOnline, setBackendOnline] = useState(null); // null=checking, true, false
 
   // ── On popup open: restore session state + check backend health ──
@@ -16,6 +25,7 @@ export default function App() {
         setSavedGoal(data.goal || "");
         setGoal(data.goal || "");
       }
+      if (data.backendOnline !== undefined) setBackendOnline(data.backendOnline);
     });
 
     // Ping the backend health endpoint
@@ -24,9 +34,12 @@ export default function App() {
       .catch(() => setBackendOnline(false));
   }, []);
 
-  const handleStartSession = () => {
+  const handleStartSession = async () => {
     const trimmed = goal.trim();
     if (!trimmed) return;
+
+    setLoading(true);
+    setError("");
 
     chrome.storage.local.set({
       goal: trimmed,
@@ -41,24 +54,42 @@ export default function App() {
         chrome.storage.local.get("backendOnline", (d) => {
           if (d.backendOnline !== undefined) setBackendOnline(d.backendOnline);
         });
+        console.log("[Focus] Session started — goal:", trimmed);
+        setSessionActive(true);
+        setSavedGoal(trimmed);
+        setLoading(false);
       });
-
-      console.log("[Focus] Session started with goal:", trimmed);
-      setSessionActive(true);
-      setSavedGoal(trimmed);
     });
   };
 
-  const handleEndSession = () => {
-    chrome.storage.local.set({ sessionActive: false }, () => {
-      chrome.runtime.sendMessage({ type: "END_SESSION" }, () => {
-        void chrome.runtime.lastError;
-      });
+  const handleEndSession = async () => {
+    setLoading(true);
+    setError("");
 
-      console.log("[Focus] Session ended.");
-      setSessionActive(false);
-      setSavedGoal("");
-      setGoal("");
+    // Read session_id before clearing storage
+    chrome.storage.local.get(["sessionId"], async ({ sessionId }) => {
+      try {
+        // 1. Notify backend to close the session (non-blocking)
+        if (sessionId) {
+          await fetch(`${API_BASE}/session/end`, {
+            method: "POST",
+            headers: apiHeaders,
+            body: JSON.stringify({ session_id: sessionId }),
+          }).catch(() => { }); // don't block UI on network error
+        }
+      } finally {
+        // 2. Always clear local state, even if the API call failed
+        chrome.storage.local.set({ sessionActive: false, sessionId: null }, () => {
+          chrome.runtime.sendMessage({ type: "END_SESSION" }, () => {
+            void chrome.runtime.lastError;
+          });
+          console.log("[Focus] Session ended.");
+          setSessionActive(false);
+          setSavedGoal("");
+          setGoal("");
+          setLoading(false);
+        });
+      }
     });
   };
 
@@ -102,6 +133,9 @@ export default function App() {
         </div>
       )}
 
+      {/* ── Error message ── */}
+      {error && <div className="error-msg">{error}</div>}
+
       {/* ── Goal Input ── */}
       <section className="popup-body">
         <label htmlFor="goal-input" className="label">
@@ -115,7 +149,7 @@ export default function App() {
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleStartSession()}
-          disabled={sessionActive}
+          disabled={sessionActive || loading}
         />
       </section>
 
@@ -124,16 +158,16 @@ export default function App() {
         <button
           className="btn btn-primary"
           onClick={handleStartSession}
-          disabled={sessionActive || !goal.trim()}
+          disabled={sessionActive || !goal.trim() || loading}
         >
-          Start Session
+          {loading && !sessionActive ? "Starting…" : "Start Session"}
         </button>
         <button
           className="btn btn-secondary"
           onClick={handleEndSession}
-          disabled={!sessionActive}
+          disabled={!sessionActive || loading}
         >
-          End Session
+          {loading && sessionActive ? "Ending…" : "End Session"}
         </button>
       </footer>
 

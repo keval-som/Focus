@@ -200,6 +200,16 @@ function openNewTab(tabId, delayMessage = false) {
             url,
           },
         });
+
+        // Send a NUDGE to the content script if the page is off-goal
+        if (!result.aligned) {
+          chrome.tabs.sendMessage(tabId, {
+            type: "NUDGE",
+            reason: result.reason,
+            confidence: result.confidence,
+            goal: session.goal,
+          }).catch(() => { }); // tab may have navigated away
+        }
       }
     }
   });
@@ -211,6 +221,7 @@ function flushToStorage() {
     totalTime: session.totalTime,
     alignedTime: session.alignedTime,
     driftCount: session.driftCount,
+    currentTabId: session.currentTabId,
   });
   saveSession(); // persist full session for SW restart recovery
 }
@@ -250,6 +261,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       console.log(`[Focus] Session started — goal: "${session.goal}" | tabId: ${session.currentTabId}`);
       flushToStorage();
       sendResponse({ ok: true });
+
+      // Immediately analyze the tab the user is already on.
+      if (tab?.id) openNewTab(tab.id, false);
     });
 
     return true; // keep channel open for async sendResponse

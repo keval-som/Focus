@@ -367,12 +367,95 @@
     };
   }
 
+  // ── Nudge toast ────────────────────────────────────────────
+
+  let nudgeTimeout = null;
+
+  /** Show a dismissable distraction warning below the main bar. */
+  function showNudge(reason, confidence) {
+    // Remove any existing nudge first
+    document.getElementById("fa-nudge")?.remove();
+    clearTimeout(nudgeTimeout);
+
+    const nudge = document.createElement("div");
+    nudge.id = "fa-nudge";
+    Object.assign(nudge.style, {
+      position: "fixed",
+      top: "45px",          // sits just below the main bar
+      left: "0",
+      width: "100%",
+      zIndex: "2147483646",
+      display: "flex",
+      alignItems: "center",
+      gap: "10px",
+      padding: "8px 16px",
+      background: "linear-gradient(90deg, #b45309, #d97706)",
+      color: "#fff7ed",
+      fontFamily: "'Segoe UI', system-ui, sans-serif",
+      fontSize: "12px",
+      fontWeight: "500",
+      boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+      boxSizing: "border-box",
+      animation: "fa-slide-in 0.2s ease",
+    });
+
+    // Inject keyframe animation once
+    if (!document.getElementById("fa-style")) {
+      const style = document.createElement("style");
+      style.id = "fa-style";
+      style.textContent = `
+        @keyframes fa-slide-in {
+          from { opacity: 0; transform: translateY(-6px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    const pct = Math.round(confidence * 100);
+    const icon = document.createElement("span");
+    icon.textContent = "⚠️";
+
+    const text = document.createElement("span");
+    text.style.flex = "1";
+    text.textContent = `Distraction detected (${pct}% confidence) — ${reason}`;
+
+    const close = document.createElement("button");
+    close.textContent = "✕";
+    Object.assign(close.style, {
+      background: "transparent",
+      border: "none",
+      color: "#fff7ed",
+      fontSize: "14px",
+      cursor: "pointer",
+      padding: "0",
+      lineHeight: "1",
+      flexShrink: "0",
+    });
+    close.addEventListener("click", () => nudge.remove());
+
+    nudge.append(icon, text, close);
+    document.body.appendChild(nudge);
+
+    // Also tint the main bar orange to signal distraction state
+    bar.style.background = "linear-gradient(90deg, #92400e, #b45309)";
+
+    // Auto-dismiss after 8 seconds
+    nudgeTimeout = setTimeout(() => {
+      nudge.remove();
+      bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
+    }, 8000);
+  }
+
   // ── 3. React to messages from the background ───────────────
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     // TAB_CHANGED — update the bar goal text and reset/resume the timer
     if (message.type === "TAB_CHANGED") {
       goalEl.textContent = `🎯 Goal: ${message.goal ?? "—"}`;
+      // Clear any nudge from the previous page and reset bar colour
+      document.getElementById("fa-nudge")?.remove();
+      bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
       startTimer(message.accumulatedSeconds || 0);
     }
 
@@ -380,6 +463,11 @@
     if (message.type === "TAB_DEACTIVATED") {
       clearInterval(timerInterval);
       timerInterval = null;
+    }
+
+    // NUDGE — AI says this page doesn't align with the goal
+    if (message.type === "NUDGE") {
+      showNudge(message.reason, message.confidence ?? 0);
     }
 
     // EXTRACT_PAGE_DATA — scrape this page and send privacy-safe data to background
@@ -397,3 +485,4 @@
     return message.type === "EXTRACT_PAGE_DATA";
   });
 })();
+
