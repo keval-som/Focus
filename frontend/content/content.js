@@ -84,7 +84,7 @@
   });
   goalEl.textContent = "🎯 Goal: —";
 
-  /* Divider */
+  /* Divider (between goal and status) */
   const div1 = document.createElement("span");
   Object.assign(div1.style, {
     width:      "1px",
@@ -94,17 +94,15 @@
     flexShrink: "0",
   });
 
-  /* Timer — centre */
+  /* Timer — hidden for now, kept in DOM for possible future use */
   const timerEl = document.createElement("span");
   timerEl.id = "fa-timer";
   timerEl.textContent = "⏱ 00:00";
   Object.assign(timerEl.style, {
+    display:            "none",
     fontVariantNumeric: "tabular-nums",
     flexShrink:         "0",
   });
-
-  /* Divider */
-  const div2 = div1.cloneNode();
 
   /* Status badge — right side */
   const statusEl = document.createElement("span");
@@ -139,11 +137,75 @@
   });
   dismissBtn.addEventListener("click", () => {
     clearInterval(timerInterval);
+    document.body.style.paddingTop = "";
+    document.documentElement.style.scrollPaddingTop = "";
+    if (typeof revertPushed === "function") revertPushed();
     bar.remove();
   });
 
-  bar.append(goalEl, div1, timerEl, div2, statusEl, dismissBtn);
+  bar.append(goalEl, div1, timerEl, statusEl, dismissBtn);
   document.body.prepend(bar);
+
+  const BAR_HEIGHT = 45;
+  const BAR_HEIGHT_PX = BAR_HEIGHT + "px";
+
+  // Push normal flow content down
+  document.body.style.paddingTop = BAR_HEIGHT_PX;
+  document.documentElement.style.scrollPaddingTop = BAR_HEIGHT_PX;
+
+  // Push fixed/sticky headers down (body padding doesn't affect them)
+  const pushed = [];
+  function pushFixedElements() {
+    document.querySelectorAll("header, nav, [role='banner'], [data-fixed-header]").forEach((el) => {
+      if (el.id === "focus-assistant-bar" || el.closest("#focus-assistant-bar")) return;
+      const cs = getComputedStyle(el);
+      if (cs.position !== "fixed" && cs.position !== "sticky") return;
+      const top = parseFloat(cs.top);
+      if (!Number.isFinite(top) || top > 20) return;
+      if (el.dataset.faPushed === "true") return;
+      const prevTop = el.style.getPropertyValue("top") || el.getAttribute("data-fa-original-top");
+      el.setAttribute("data-fa-original-top", prevTop || "0");
+      el.style.setProperty("top", BAR_HEIGHT_PX, "important");
+      el.dataset.faPushed = "true";
+      pushed.push(el);
+    });
+    // Also catch any fixed element at top that's full-width (common header pattern)
+    document.querySelectorAll("*").forEach((el) => {
+      if (el.id === "focus-assistant-bar" || el.closest("#focus-assistant-bar")) return;
+      if (pushed.includes(el)) return;
+      const cs = getComputedStyle(el);
+      if (cs.position !== "fixed") return;
+      const top = parseFloat(cs.top);
+      if (!Number.isFinite(top) || top > 20) return;
+      if (el.offsetWidth < window.innerWidth * 0.4) return; // skip sidebars
+      if (el.dataset.faPushed === "true") return;
+      const prevTop = el.style.getPropertyValue("top") || el.getAttribute("data-fa-original-top");
+      el.setAttribute("data-fa-original-top", prevTop || "0");
+      el.style.setProperty("top", BAR_HEIGHT_PX, "important");
+      el.dataset.faPushed = "true";
+      pushed.push(el);
+    });
+  }
+  pushFixedElements();
+  setTimeout(pushFixedElements, 500);
+  let pushDebounce = null;
+  const observer = new MutationObserver(() => {
+    if (pushDebounce) clearTimeout(pushDebounce);
+    pushDebounce = setTimeout(pushFixedElements, 300);
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  function revertPushed() {
+    observer.disconnect();
+    pushed.forEach((el) => {
+      if (el.dataset.faPushed !== "true") return;
+      const orig = el.getAttribute("data-fa-original-top");
+      if (orig !== null) el.style.setProperty("top", orig || "0", "important");
+      else el.style.removeProperty("top");
+      delete el.dataset.faPushed;
+      el.removeAttribute("data-fa-original-top");
+    });
+  }
 
   // ── State application ──────────────────────────────────────
 
