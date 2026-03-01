@@ -66,6 +66,54 @@ function openNewTab(tabId) {
   requestAnalysis(tabId);
 }
 
+// Lowercase title substrings that reliably identify bot-challenge / access-denied
+// interstitial pages. These pages contain no real content worth classifying and
+// must never be cached — the actual destination page will load momentarily.
+const ANTI_BOT_TITLE_PATTERNS = [
+  "just a moment",           // Cloudflare challenge
+  "checking your browser",   // Cloudflare / generic
+  "please wait",             // generic waiting screens
+  "attention required",      // Cloudflare attention page
+  "access denied",           // WAF / firewall blocks
+  "security check",          // various WAFs
+  "ddos protection",         // DDoS guard
+  "verify you are human",    // CAPTCHA gates
+  "enable javascript",       // JS-required interstitial
+  "bot check",               // generic bot checks
+  "one more step",           // Google reCAPTCHA gateway
+  "request blocked",         // Akamai / CDN blocks
+];
+
+// Substrings matched against the full URL (lowercase) for CDN challenge paths
+// that appear before the real page loads.
+const ANTI_BOT_URL_PATTERNS = [
+  "/cdn-cgi/",               // Cloudflare challenge path
+  "challenge.cloudflare.com",
+  "/akamai-challenge",
+];
+
+/**
+ * Returns true when the page looks like a transient bot-challenge or
+ * access-denied interstitial rather than real content.
+ * Skipping these pages prevents a wrong "not aligned" verdict from being
+ * written to the cache and haunting the real page on the next visit.
+ */
+function isAntiBotPage({ url = "", title = "", snippet = "" }) {
+  const lowerTitle   = title.toLowerCase();
+  const lowerUrl     = url.toLowerCase();
+  const lowerSnippet = snippet.toLowerCase();
+
+  if (ANTI_BOT_TITLE_PATTERNS.some(p => lowerTitle.includes(p)))   return true;
+  if (ANTI_BOT_URL_PATTERNS.some(p => lowerUrl.includes(p)))       return true;
+
+  // Extra signal: very short snippet + title that mentions "checking" / "verif"
+  // catches challenge pages whose titles we haven't enumerated yet.
+  if (lowerSnippet.length < 120 &&
+      (lowerTitle.includes("check") || lowerTitle.includes("verif"))) return true;
+
+  return false;
+}
+
 /**
  * Extract page data from a tab and send it to the backend for AI analysis.
  * Separated from openNewTab so we can trigger analysis on session start
@@ -79,6 +127,14 @@ function requestAnalysis(tabId) {
 
     const { url, title, snippet } = response.data;
     if (!url) return;
+
+    // Skip bot-challenge / access-denied interstitials before hitting the backend.
+    // These pages are transient — caching their verdict would permanently flag
+    // the real destination URL for the rest of the session.
+    if (isAntiBotPage({ url, title, snippet })) {
+      console.log(`[Focus] Anti-bot page detected — skipping analysis. title: "${title}" | url: ${url}`);
+      return;
+    }
 
     // Always read from storage — SW may have restarted since session was created
     chrome.storage.local.get(["sessionId", "sessionActive"], ({ sessionId, sessionActive }) => {
