@@ -2,6 +2,8 @@
 
 A Chrome Extension + FastAPI backend that uses an LLM to keep you aligned with your browsing goal in real time.
 
+![Focus System Architecture](Focus_Architecture.png)
+
 > **Built for QuackHack 2026 · 24-hour hackathon**
 
 ---
@@ -95,19 +97,43 @@ npm run build      # one-time production build
 
 ---
 
+## Why Focus Matters
+
+The browser is our most-used productivity tool, but it lacks any built-in accountability. The "Focus" assistant provides a real-time accountability layer to help you stay aligned with your deep work goals.
+
+---
+
+## Technical Architecture & Challenges
+
+### 🚀 Batch Analysis for Context & Cost
+Calling an LLM on every tab switch is computationally expensive and lack context. We implemented a **Batch Processing** model:
+- The extension logs visits instantly to a "fast-path" `/session/log` endpoint.
+- Every 4 minutes, the background script triggers `/session/analyze_batch`.
+- This provides the AI with a full context window of your recent behavior (URLs, titles, and DOM snippets) to make a far more accurate "on-track" judgement.
+
+### 💾 Persistent Service Worker State (MV3)
+Chrome Manifest V3 background scripts are ephemeral and can be suspended at any time. To prevent losing session data or timing progress:
+- We leverage `chrome.storage.session` for high-frequency state persistence.
+- A robust `withSession()` wrapper ensures the state is rehydrated automatically whenever the Service Worker wakes up.
+
+### 🤖 Precise Analysis via DOM Scraping
+Instead of relying solely on URLs (which can be ambiguous), our content scripts perform lightweight **DOM scraping** to extract page titles and semantic snippets, providing the Qwen-2.5-7B model with enough data to distinguish between "Researching ML" on GitHub and "Browsing random repos."
+
+---
+
 ## Project Structure
 
 ```
 Focus/
 ├── backend/
-│   ├── main.py          # FastAPI app & endpoints
-│   ├── database.py      # SQLite setup & helpers
-│   ├── models.py        # Pydantic schemas
+│   ├── main.py          # FastAPI app & batch processing logic
+│   ├── database.py      # SQLite persistence layer
+│   ├── models.py        # Pydantic validation schemas
 │   ├── requirements.txt
 │   └── .env             # API keys (not committed)
 └── frontend/
-    ├── background/background.js   # Service worker
-    ├── content/content.js         # Floating goal bar
+    ├── background/background.js   # Service worker & session management
+    ├── content/content.js         # UI overlay & DOM extraction
     ├── popup/                     # React popup UI
-    └── manifest.json
+    └── manifest.json              # Chrome MV3 configuration
 ```
