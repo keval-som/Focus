@@ -1,30 +1,77 @@
-// Main React component rendered inside the Chrome extension popup.
-// Future: wire up chrome.storage to persist goal, and call AI nudge APIs.
-
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 export default function App() {
-  // Local state for the user's current focus goal
-  const [goal, setGoal] = useState("");
+  const [goal, setGoal]               = useState("");
+  const [sessionActive, setSessionActive] = useState(false);
+  const [savedGoal, setSavedGoal]     = useState("");
 
-  // Placeholder handlers — real logic (storage, messaging) added in next sprint
+  // On popup open, read existing session state from storage
+  useEffect(() => {
+    chrome.storage.local.get(["goal", "sessionActive"], (data) => {
+      if (data.sessionActive) {
+        setSessionActive(true);
+        setSavedGoal(data.goal || "");
+        setGoal(data.goal || "");
+      }
+    });
+  }, []);
+
   const handleStartSession = () => {
-    // TODO: Save goal to chrome.storage.local and notify content script
-    console.log("[Focus] Session started with goal:", goal);
+    const trimmed = goal.trim();
+    if (!trimmed) return;
+
+    // 1. Write session state to storage (content script reads this on page load)
+    chrome.storage.local.set({
+      goal:          trimmed,
+      sessionActive: true,
+      startTime:     Date.now(),
+      alignedTime:   0,
+      driftCount:    0,
+    }, () => {
+      // 2. Tell the background service worker to start tab tracking
+      chrome.runtime.sendMessage({ type: "START_SESSION", goal: trimmed }, () => {
+        void chrome.runtime.lastError; // suppress if SW is waking up
+      });
+
+      console.log("[Focus] Session started with goal:", trimmed);
+      setSessionActive(true);
+      setSavedGoal(trimmed);
+    });
   };
 
   const handleEndSession = () => {
-    // TODO: Clear session state and show summary
-    console.log("[Focus] Session ended.");
+    // 1. Update storage so all content scripts drop back to "Goal: None"
+    chrome.storage.local.set({ sessionActive: false }, () => {
+      // 2. Tell the background service worker to stop tracking
+      chrome.runtime.sendMessage({ type: "END_SESSION" }, () => {
+        void chrome.runtime.lastError;
+      });
+
+      console.log("[Focus] Session ended.");
+      setSessionActive(false);
+      setSavedGoal("");
+      setGoal("");
+    });
   };
 
   return (
     <div className="popup-container">
+
       {/* ── Header ── */}
       <header className="popup-header">
         <span className="logo">🎯</span>
         <h1>Focus Assistant</h1>
+        {/* Live session indicator dot */}
+        <span className={`status-dot ${sessionActive ? "active" : ""}`} />
       </header>
+
+      {/* ── Active session banner ── */}
+      {sessionActive && (
+        <div className="session-banner">
+          <span className="session-banner-label">Active goal</span>
+          <span className="session-banner-goal">"{savedGoal}"</span>
+        </div>
+      )}
 
       {/* ── Goal Input ── */}
       <section className="popup-body">
@@ -35,28 +82,33 @@ export default function App() {
           id="goal-input"
           className="goal-input"
           type="text"
-          placeholder="Enter your goal…"
+          placeholder="Enter your goal"
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
+          // Allow pressing Enter to start session
+          onKeyDown={(e) => e.key === "Enter" && handleStartSession()}
+          disabled={sessionActive}
         />
       </section>
 
-      {/* ── Actions ── */}
+      {/* ── Action Buttons ── */}
       <footer className="popup-footer">
         <button
           className="btn btn-primary"
           onClick={handleStartSession}
-          disabled={!goal.trim()}
+          disabled={sessionActive || !goal.trim()}
         >
           Start Session
         </button>
         <button
           className="btn btn-secondary"
           onClick={handleEndSession}
+          disabled={!sessionActive}
         >
           End Session
         </button>
       </footer>
+
     </div>
   );
 }

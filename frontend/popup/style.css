@@ -48,6 +48,48 @@ body {
   color: #ffffff;
 }
 
+/* Session indicator dot — grey by default, green when active */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3a3a50;
+  margin-left: auto;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.status-dot.active {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e99;
+}
+
+/* ── Active session banner ── */
+.session-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: #121220;
+  border: 1px solid #2e2e50;
+  border-left: 3px solid #22c55e;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.session-banner-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #22c55e;
+}
+
+.session-banner-goal {
+  font-size: 13px;
+  color: #d0d0e8;
+  word-break: break-word;
+}
+
 /* ── Body ── */
 .popup-body {
   display: flex;

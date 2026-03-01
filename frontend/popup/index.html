@@ -4,14 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Focus Assistant</title>
-    <!-- Webpack bundles style.css and injects it via JS; link kept for direct-open fallback -->
-    <link rel="stylesheet" href="style.css" />
+    <!-- Webpack-built CSS bundle -->
+    <link rel="stylesheet" href="../dist/popup.bundle.css" />
   </head>
   <body>
     <!-- React mounts here -->
     <div id="root"></div>
 
-    <!-- Webpack output bundle (built from popup/index.js) -->
+    <!-- Webpack-built JS bundle -->
     <script src="../dist/popup.bundle.js"></script>
   </body>
 </html>
