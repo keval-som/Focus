@@ -161,9 +161,24 @@ function openNewTab(tabId, delayMessage = false) {
     void chrome.runtime.lastError;
     if (!response) return;
 
-    const { url, title, snippet } = response.data ?? {};
+    const { url, title, snippet, bypassLLM, reason } = response.data ?? {};
 
-    console.log("[Focus] AI payload:", { goal: session.goal, url, title });
+    console.log("[Focus] AI payload:", { goal: session.goal, url, title, bypassLLM, reason });
+
+    // Handle bypass edge cases (auth pages, local pages, etc.)
+    if (bypassLLM) {
+      console.log(`[Focus] Bypassing LLM for edge case: ${reason}`);
+      chrome.storage.local.set({
+        lastAnalysis: {
+          aligned: true, // Treat necessary bypass pages as implicitly aligned
+          confidence: 1.0,
+          reason: reason || "System / Private Page",
+          cached: true,
+          url,
+        },
+      });
+      return;
+    }
 
     // POST to backend for AI alignment scoring
     if (session.sessionId && url) {

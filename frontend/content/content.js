@@ -211,12 +211,47 @@
 
   // ── Page data extraction (privacy-safe) ───────────────────
 
-  // Domains where content is inherently private — snippet is fully redacted.
-  const PRIVATE_DOMAINS = [
-    "mail.google", "outlook.live", "outlook.office",
-    "web.whatsapp", "messenger.com", "telegram.org",
-    "paypal.com", "stripe.com",
-    "chase.com", "bankofamerica.com", "wellsfargo.com",
+  // ── Edge cases & Privacy bypasses ─────────────────────────────
+
+  // Rules for pages that should not be sent to the LLM (API savings + privacy).
+  const BYPASS_RULES = [
+    {
+      name: "Authentication / Login",
+      matches: (h, p) =>
+        ["accounts.google.com", "github.com", "appleid.apple.com", "okta.com", "auth0.com", "login.microsoftonline.com"].some(d => h.includes(d)) ||
+        /(login|signin|signup|auth|oauth|sso|session)/i.test(p) ||
+        /(login|signin|signup|auth|oauth|sso|session)\./i.test(h)
+    },
+    {
+      name: "Payment Gateway",
+      matches: (h, p) =>
+        ["paypal.com", "stripe.com", "checkout.visa.com"].some(d => h.includes(d)) ||
+        /(checkout|billing|cart|payment|subscribe)/i.test(p)
+    },
+    {
+      name: "Private Data / Banking",
+      matches: (h, _p) =>
+        ["mail.google", "outlook.live", "outlook.office", "web.whatsapp", "messenger.com", "telegram.org", "chase.com", "bankofamerica.com", "wellsfargo.com"].some(d => h.includes(d))
+    },
+    {
+      name: "Bot Check / CAPTCHA",
+      matches: (h, p) =>
+        h.includes("challenges.cloudflare.com") ||
+        /(captcha|verify-human)/i.test(p)
+    },
+    {
+      name: "Search Engine Landing Page",
+      // Blank search box pages (e.g. google.com/ without a query)
+      matches: (h, p) =>
+        (["google.com", "bing.com", "duckduckgo.com", "yahoo.com"].some(d => h.includes(d))) &&
+        (p === "/" || p === "") &&
+        !window.location.search.includes("q=")
+    },
+    {
+      name: "Local / Internal Page",
+      matches: (h, _p) =>
+        h === "localhost" || h === "127.0.0.1" || !h.includes(".")
+    }
   ];
 
   // Per-site extraction rules for SPAs and sites with non-standard DOM structure.
@@ -289,14 +324,19 @@
 
   function extractPageData() {
     const hostname = window.location.hostname;
-    const isPrivate = PRIVATE_DOMAINS.some((d) => hostname.includes(d));
+    const pathname = window.location.pathname;
 
-    if (isPrivate) {
+    // Check if page matches any bypass rule
+    const bypassMatch = BYPASS_RULES.find(rule => rule.matches(hostname, pathname));
+
+    if (bypassMatch) {
       return {
         url: window.location.origin + window.location.pathname,
         title: document.title,
-        snippet: "[content redacted]",
+        snippet: `[Bypassed LLM - ${bypassMatch.name}]`,
         private: true,
+        bypassLLM: true,
+        reason: bypassMatch.name
       };
     }
 
