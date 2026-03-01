@@ -187,6 +187,33 @@ async function runBatchAnalysis() {
       // Persist latest score so popup can display it
       chrome.storage.local.set({ focusScore: focus_score, isOnTrack: is_on_track });
 
+      // Show appreciation banner if user is on track with high score
+      if (is_on_track && focus_score >= 70) {
+        const appreciationData = {
+          reason:      coaching_nudge,
+          focus_score,
+          goal:        goal ?? "",
+        };
+        // Store so content script can show appreciation if message arrived before script was ready
+        chrome.storage.local.set({
+          lastAppreciation:   appreciationData,
+          lastAppreciationAt: Date.now(),
+        });
+
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+          if (!tab?.id) {
+            console.warn("[Focus] No active tab for appreciation.");
+            return;
+          }
+          chrome.tabs.sendMessage(tab.id, {
+            type: "APPRECIATION",
+            ...appreciationData,
+          }).catch((err) => {
+            console.warn("[Focus] Appreciation delivery failed (tab may not have content script):", err?.message || String(err));
+          });
+        });
+      }
+
       // Nudge the user if they're off track
       if (!is_on_track) {
         const nudgeData = {

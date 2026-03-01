@@ -377,6 +377,123 @@
     };
   }
 
+  // ── Appreciation banner ───────────────────────────────────────────
+
+  /** Show a positive feedback banner when user is on track with high focus score. */
+  function showAppreciation(reason, focus_score, goal) {
+    // Replace any existing appreciation or nudge
+    document.getElementById("fa-appreciation")?.remove();
+    document.getElementById("fa-nudge")?.remove();
+
+    // Inject slide-in animation once (reuse existing style if present)
+    if (!document.getElementById("fa-style")) {
+      const style = document.createElement("style");
+      style.id = "fa-style";
+      style.textContent = `
+        @keyframes fa-slide-in {
+          from { opacity: 0; transform: translateY(-8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    const appreciation = document.createElement("div");
+    appreciation.id = "fa-appreciation";
+    Object.assign(appreciation.style, {
+      position:    "fixed",
+      top:         "45px",
+      left:        "0",
+      width:       "100%",
+      zIndex:      "2147483646",
+      display:     "flex",
+      alignItems:  "flex-start",
+      gap:         "12px",
+      padding:     "12px 16px",
+      background:  "linear-gradient(90deg, #065f46, #047857)",
+      color:       "#d1fae5",
+      fontFamily:  "'Segoe UI', system-ui, sans-serif",
+      boxShadow:   "0 3px 10px rgba(0,0,0,0.35)",
+      boxSizing:   "border-box",
+      animation:   "fa-slide-in 0.25s ease",
+    });
+
+    // Icon
+    const icon = document.createElement("span");
+    icon.textContent = "✨";
+    Object.assign(icon.style, { fontSize: "18px", flexShrink: "0", marginTop: "1px" });
+
+    // Message block
+    const msgBlock = document.createElement("div");
+    Object.assign(msgBlock.style, { flex: "1", display: "flex", flexDirection: "column", gap: "4px" });
+
+    const goalLine = document.createElement("div");
+    Object.assign(goalLine.style, { fontSize: "13px", fontWeight: "700", lineHeight: "1.4" });
+    goalLine.textContent = `Great job staying focused on: "${goal || "—"}"`;
+
+    const scoreLine = document.createElement("div");
+    Object.assign(scoreLine.style, { fontSize: "13px", fontWeight: "400", lineHeight: "1.4" });
+    scoreLine.textContent = `Focus Score: ${focus_score}/100`;
+
+    const reasonLine = document.createElement("div");
+    Object.assign(reasonLine.style, {
+      fontSize:   "11px",
+      fontWeight: "400",
+      opacity:    "0.85",
+      marginTop:  "4px",
+      lineHeight: "1.4",
+    });
+    reasonLine.textContent = reason;
+
+    msgBlock.append(goalLine, scoreLine, reasonLine);
+
+    function dismissAppreciation() {
+      appreciation.remove();
+      bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
+    }
+
+    // Close button (X)
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "✕";
+    closeBtn.title = "Dismiss";
+    Object.assign(closeBtn.style, {
+      background:  "transparent",
+      border:      "none",
+      color:       "rgba(209,250,229,0.8)",
+      fontSize:    "18px",
+      cursor:      "pointer",
+      lineHeight:  "1",
+      padding:     "0",
+      marginLeft:  "auto",
+      flexShrink:  "0",
+      width:       "24px",
+      height:      "24px",
+      display:     "flex",
+      alignItems:  "center",
+      justifyContent: "center",
+      borderRadius: "4px",
+      transition:  "background 0.2s, color 0.2s",
+    });
+    closeBtn.addEventListener("mouseenter", () => {
+      closeBtn.style.background = "rgba(209,250,229,0.2)";
+      closeBtn.style.color = "#d1fae5";
+    });
+    closeBtn.addEventListener("mouseleave", () => {
+      closeBtn.style.background = "transparent";
+      closeBtn.style.color = "rgba(209,250,229,0.8)";
+    });
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dismissAppreciation();
+    });
+
+    appreciation.append(icon, msgBlock, closeBtn);
+    document.body.appendChild(appreciation);
+
+    // Tint the main bar green while appreciation is visible
+    bar.style.background = "linear-gradient(90deg, #065f46, #047857)";
+  }
+
   // ── Nudge banner ───────────────────────────────────────────
 
   /** Show a persistent distraction warning — stays until the user dismisses it. */
@@ -508,6 +625,7 @@
     if (message.type === "TAB_CHANGED") {
       applyState({ goal: message.goal, sessionActive: true });
       document.getElementById("fa-nudge")?.remove();
+      document.getElementById("fa-appreciation")?.remove();
       bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
     }
 
@@ -515,7 +633,17 @@
     if (message.type === "SESSION_ENDED") {
       applyState({ goal: "", sessionActive: false });
       document.getElementById("fa-nudge")?.remove();
+      document.getElementById("fa-appreciation")?.remove();
       bar.style.background = "linear-gradient(90deg, #4f46e5, #6366f1)";
+    }
+
+    // APPRECIATION — AI says user is doing great (high focus score, on track)
+    if (message.type === "APPRECIATION") {
+      showAppreciation(
+        message.reason,
+        message.focus_score,
+        message.goal
+      );
     }
 
     // NUDGE — AI says this page doesn't align with the goal
