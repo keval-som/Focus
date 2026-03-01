@@ -1,0 +1,14 @@
+# FastAPI and ASGI server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Data validation and serialization
+pydantic==2.5.0
+
+# Environment variable management
+python-dotenv==1.0.0
+
+# OpenAI SDK (compatible with Featherless.ai)
+# Using latest stable version that works with Featherless.ai API
+openai>=1.12.0
+httpx>=0.25.0
