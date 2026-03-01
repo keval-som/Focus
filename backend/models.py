@@ -10,6 +10,7 @@ These models provide:
 """
 
 from pydantic import BaseModel, Field
+from typing import List
 
 
 class StartRequest(BaseModel):
@@ -42,15 +43,16 @@ class StartResponse(BaseModel):
     )
 
 
-class AnalyzeRequest(BaseModel):
+class LogRequest(BaseModel):
     """
-    Request model for analyzing a URL's alignment with the session goal.
+    Request model for logging a tab visit.
     
     Attributes:
         session_id: The UUID of the active browsing session
-        url: The URL of the page to analyze
-        title: The page title (for context)
+        url: The URL of the visited page
+        title: The page title
         snippet: A text snippet or preview of the page content
+        duration_seconds: Time spent on the page in seconds
     """
     session_id: str = Field(
         ...,
@@ -60,7 +62,7 @@ class AnalyzeRequest(BaseModel):
         ...,
         min_length=1,
         max_length=2048,
-        description="The URL of the page to analyze"
+        description="The URL of the visited page"
     )
     title: str = Field(
         ...,
@@ -74,36 +76,67 @@ class AnalyzeRequest(BaseModel):
         max_length=2000,
         description="Text snippet or preview of the page content"
     )
+    duration_seconds: int = Field(
+        ...,
+        ge=0,
+        description="Time spent on the page in seconds"
+    )
 
 
-class AnalyzeResponse(BaseModel):
+class LogResponse(BaseModel):
     """
-    Response model for URL analysis endpoint.
+    Response model for tab visit logging endpoint.
     
     Attributes:
-        aligned: Boolean indicating if the page aligns with the user's goal
-        confidence: Confidence score between 0.0 and 1.0
-        reason: Human-readable explanation for the alignment decision
-        cached: True if this result was served from cache, False if from LLM
+        success: Boolean indicating if the log was saved successfully
     """
-    aligned: bool = Field(
+    success: bool = Field(
         ...,
-        description="Whether the page aligns with the user's goal"
+        description="Whether the log was saved successfully"
     )
-    confidence: float = Field(
+
+
+class AnalyzeBatchRequest(BaseModel):
+    """
+    Request model for batch analysis of recent browsing activity.
+    
+    Attributes:
+        session_id: The UUID of the active browsing session
+    """
+    session_id: str = Field(
         ...,
-        ge=0.0,
-        le=1.0,
-        description="Confidence score (0.0 to 1.0)"
+        description="The session ID from the start endpoint"
     )
-    reason: str = Field(
+
+
+class AnalyzeBatchResponse(BaseModel):
+    """
+    Response model for batch analysis endpoint.
+    
+    Attributes:
+        focus_score: Focus score from 0-100 based on goal alignment
+        is_on_track: Boolean indicating if user is staying focused
+        coaching_nudge: Encouraging or corrective message (1 sentence)
+        url_breakdown: List of URL analysis results with alignment and confidence
+    """
+    focus_score: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="Focus score from 0-100 based on goal alignment"
+    )
+    is_on_track: bool = Field(
+        ...,
+        description="Whether the user is staying focused on their goal"
+    )
+    coaching_nudge: str = Field(
         ...,
         min_length=1,
-        description="Explanation for the alignment decision"
+        description="Encouraging or corrective message (1 sentence)"
     )
-    cached: bool = Field(
+    url_breakdown: List[dict] = Field(
         ...,
-        description="True if result from cache, False if from LLM"
+        description="List of URL analysis results. Each dict contains 'url' (str), 'aligned' (bool), and 'confidence' (float)"
     )
 
 

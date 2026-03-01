@@ -1,14 +1,14 @@
 """
 FastAPI Main Application for Focus-Aware Browsing Assistant
 
-This module implements the core FastAPI application with three endpoints:
+This module implements the core FastAPI application with batch processing endpoints:
 1. POST /api/v1/session/start - Initialize a new browsing session
-2. POST /api/v1/session/analyze - Analyze URL alignment with user goal
-3. POST /api/v1/session/end - End a browsing session
+2. POST /api/v1/session/log - Log a tab visit (fast, no LLM)
+3. POST /api/v1/session/analyze_batch - Batch analyze recent activity (every 4 minutes)
+4. POST /api/v1/session/end - End a browsing session
 
-The application acts as an intermediary between the Chrome Extension and
-the Featherless.ai LLM API, with SQLite serving as both analytics logger
-and response cache.
+The application uses a batch processing model to save API costs and improve context.
+The frontend constantly logs tab visits, and every 4 minutes requests a batch analysis.
 """
 
 import os
@@ -26,14 +26,17 @@ from database import (
     create_session,
     end_session,
     get_session_goal,
-    get_cached_log,
-    save_log
+    log_tab_visit,
+    get_recent_logs,
+    save_batch_analysis
 )
 from models import (
     StartRequest,
     StartResponse,
-    AnalyzeRequest,
-    AnalyzeResponse,
+    LogRequest,
+    LogResponse,
+    AnalyzeBatchRequest,
+    AnalyzeBatchResponse,
     EndRequest
 )
 
@@ -159,42 +162,68 @@ async def start_session(
         )
 
 
-@app.post("/api/v1/session/analyze", response_model=AnalyzeResponse)
-async def analyze_url(
-    request: AnalyzeRequest,
+@app.post("/api/v1/session/log", response_model=LogResponse)
+async def log_visit(
+    request: LogRequest,
     _: str = Depends(verify_extension_key)
-) -> AnalyzeResponse:
+) -> LogResponse:
     """
-    Analyze whether a URL aligns with the user's session goal.
+    Log a tab visit to the database.
     
-    This endpoint implements a two-tier strategy:
-    1. Cache Check: First checks SQLite for a cached analysis
-    2. LLM Call: If cache miss, calls Featherless.ai LLM API
-    
-    The result is always saved to the database (for analytics and future caching).
+    This endpoint is designed to be extremely fast - it only writes raw data
+    without any AI analysis. The analysis happens later in batch processing.
+    NO LLM calls are made here.
     
     Args:
-        request: AnalyzeRequest containing session_id, url, title, snippet
+        request: LogRequest containing session_id, url, title, snippet, duration_seconds
         _: Verified extension key (from dependency)
     
     Returns:
-        AnalyzeResponse: Contains aligned, confidence, reason, and cached flag
+        LogResponse: Contains success status
+    
+    Raises:
+        HTTPException: 500 if database operation fails
+    """
+    try:
+        log_tab_visit(
+            session_id=request.session_id,
+            url=request.url,
+            title=request.title,
+            snippet=request.snippet,
+            duration_seconds=request.duration_seconds
+        )
+        return LogResponse(success=True)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to log visit: {str(e)}"
+        )
+
+
+@app.post("/api/v1/session/analyze_batch", response_model=AnalyzeBatchResponse)
+async def analyze_batch(
+    request: AnalyzeBatchRequest,
+    _: str = Depends(verify_extension_key)
+) -> AnalyzeBatchResponse:
+    """
+    Batch analyze recent browsing activity for a session.
+    
+    This endpoint fetches the last 4 minutes of activity and analyzes it together
+    to provide better context and save API costs. The logs are sorted by duration
+    (longest first) and token optimization is applied (snippets omitted for logs 6+).
+    
+    Args:
+        request: AnalyzeBatchRequest containing session_id
+        _: Verified extension key (from dependency)
+    
+    Returns:
+        AnalyzeBatchResponse: Contains focus_score, is_on_track, and coaching_nudge
     
     Raises:
         HTTPException: 404 if session not found/inactive
         HTTPException: 500 for database or LLM API errors
     """
-    # Step 1: Check cache first
-    cached_result = get_cached_log(request.session_id, request.url)
-    if cached_result:
-        return AnalyzeResponse(
-            aligned=cached_result["aligned"],
-            confidence=cached_result["confidence"],
-            reason=cached_result["reason"],
-            cached=True
-        )
-    
-    # Step 2: Get session goal (validates session exists and is active)
+    # Step 1: Get session goal (validates session exists and is active)
     goal = get_session_goal(request.session_id)
     if not goal:
         raise HTTPException(
@@ -202,7 +231,43 @@ async def analyze_url(
             detail="Session not found or inactive. Please start a new session."
         )
     
-    # Step 3: Construct LLM prompt and call API
+    # Step 2: Fetch recent activity (last 4 minutes)
+    recent_logs = get_recent_logs(request.session_id, minutes=4)
+    
+    if not recent_logs:
+        # No recent activity - return default response
+        return AnalyzeBatchResponse(
+            focus_score=100,
+            is_on_track=True,
+            coaching_nudge="No recent activity detected.",
+            url_breakdown=[]
+        )
+    
+    # Step 3: Sort logs by duration_seconds in descending order (longest first)
+    sorted_logs = sorted(recent_logs, key=lambda x: x["duration_seconds"], reverse=True)
+    
+    # Step 4: Build combined_logs string with token optimization
+    combined_logs_parts = []
+    for idx, log in enumerate(sorted_logs):
+        url = log.get("url", "")
+        title = log.get("title", "")
+        duration = log.get("duration_seconds", 0)
+        snippet = log.get("snippet", "")
+        
+        if idx < 5:
+            # Top 5 logs: include full context with snippet
+            combined_logs_parts.append(
+                f"URL: {url} | Title: {title} | Time Spent: {duration}s | Snippet: {snippet}"
+            )
+        else:
+            # Log 6 and beyond: omit snippet to save tokens
+            combined_logs_parts.append(
+                f"URL: {url} | Title: {title} | Time Spent: {duration}s | (Snippet omitted to save tokens)"
+            )
+    
+    combined_logs = "\n".join(combined_logs_parts)
+    
+    # Step 5: Construct LLM payload
     if not featherless_client:
         raise HTTPException(
             status_code=500,
@@ -210,20 +275,21 @@ async def analyze_url(
         )
     
     system_prompt = (
-        "You are an objective productivity classifier. "
-        "Analyze whether a web page aligns with a user's stated goal. "
-        "Respond ONLY in strict JSON schema: "
-        '{"aligned": boolean, "confidence": float, "reason": string}'
+        "You are an AI Focus Coach. Your job is to analyze a user's recent web browsing history "
+        "and determine if they are staying focused on their stated goal. Calculate a focus score "
+        "from 0-100 based on how much time was spent on goal-aligned vs distracting sites. "
+        "You must return a strict JSON object with 4 keys: "
+        "`focus_score` (integer 0-100), "
+        "`is_on_track` (boolean), "
+        "`coaching_nudge` (1-sentence string), and "
+        "`url_breakdown` (an array of objects, where each object has `url` (string), "
+        "`aligned` (boolean), and `confidence` (float 0.0-1.0) for every unique URL evaluated in this batch)."
     )
     
     user_prompt = (
-        f"User's Goal: {goal}\n\n"
-        f"Page Title: {request.title}\n\n"
-        f"Page Content Snippet: {request.snippet}\n\n"
-        f"URL: {request.url}\n\n"
-        "Determine if this page aligns with the user's goal. "
-        "Provide a boolean 'aligned' value, a confidence score (0.0 to 1.0), "
-        "and a brief reason explaining your decision."
+        f"User Goal: {goal}\n\n"
+        f"Recent Activity (Sorted by Time Spent):\n{combined_logs}\n\n"
+        "Instructions: Analyze the activity and output the exact JSON format."
     )
     
     try:
@@ -235,35 +301,63 @@ async def analyze_url(
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.3  # Lower temperature for more consistent classification
+            temperature=0.1  # Lower temperature for more consistent analysis
         )
         
         # Extract the JSON response from the LLM
         content = response.choices[0].message.content
         
-        # Step 4: Parse JSON response
+        # Step 6: Parse JSON response with error handling
         try:
             result = json.loads(content)
         except json.JSONDecodeError as e:
-            # Fallback: If JSON parsing fails, create a safe default response
-            raise HTTPException(
-                status_code=500,
-                detail=f"LLM returned invalid JSON: {str(e)}. Content: {content}"
+            # Fallback: If JSON parsing fails, provide a safe default response
+            print(f"Warning: LLM returned invalid JSON: {str(e)}. Content: {content}")
+            return AnalyzeBatchResponse(
+                focus_score=50,
+                is_on_track=False,
+                coaching_nudge="Unable to analyze activity. Please try again.",
+                url_breakdown=[]
             )
         
         # Validate required fields exist
-        if not all(key in result for key in ["aligned", "confidence", "reason"]):
-            raise HTTPException(
-                status_code=500,
-                detail="LLM response missing required fields"
+        required_fields = ["focus_score", "is_on_track", "coaching_nudge", "url_breakdown"]
+        if not all(key in result for key in required_fields):
+            # Fallback if fields are missing
+            missing = [f for f in required_fields if f not in result]
+            print(f"Warning: LLM response missing fields: {missing}")
+            return AnalyzeBatchResponse(
+                focus_score=50,
+                is_on_track=False,
+                coaching_nudge="Analysis incomplete. Please try again.",
+                url_breakdown=[]
             )
         
-        aligned = bool(result["aligned"])
-        confidence = float(result["confidence"])
-        reason = str(result["reason"])
+        focus_score = int(result["focus_score"])
+        is_on_track = bool(result["is_on_track"])
+        coaching_nudge = str(result["coaching_nudge"])
+        url_breakdown = result.get("url_breakdown", [])
         
-        # Ensure confidence is in valid range
-        confidence = max(0.0, min(1.0, confidence))
+        # Validate url_breakdown is a list
+        if not isinstance(url_breakdown, list):
+            print(f"Warning: url_breakdown is not a list, got {type(url_breakdown)}")
+            url_breakdown = []
+        
+        # Ensure focus_score is in valid range
+        focus_score = max(0, min(100, focus_score))
+        
+        # Step 7: Save batch analysis to database
+        try:
+            save_batch_analysis(
+                session_id=request.session_id,
+                focus_score=focus_score,
+                is_on_track=is_on_track,
+                coaching_nudge=coaching_nudge,
+                url_breakdown=url_breakdown
+            )
+        except Exception as e:
+            # Log error but don't fail the request - we still have the LLM result
+            print(f"Warning: Failed to save batch analysis to database: {str(e)}")
         
     except HTTPException:
         # Re-raise HTTP exceptions
@@ -275,27 +369,12 @@ async def analyze_url(
             detail=f"LLM API error: {str(e)}"
         )
     
-    # Step 5: Save to database (for analytics and future caching)
-    try:
-        save_log(
-            session_id=request.session_id,
-            url=request.url,
-            title=request.title,
-            snippet=request.snippet,
-            aligned=aligned,
-            confidence=confidence,
-            reason=reason
-        )
-    except Exception as e:
-        # Log error but don't fail the request - we still have the LLM result
-        print(f"Warning: Failed to save log to database: {str(e)}")
-    
-    # Step 6: Return the analysis result
-    return AnalyzeResponse(
-        aligned=aligned,
-        confidence=confidence,
-        reason=reason,
-        cached=False
+    # Step 8: Return the analysis result
+    return AnalyzeBatchResponse(
+        focus_score=focus_score,
+        is_on_track=is_on_track,
+        coaching_nudge=coaching_nudge,
+        url_breakdown=url_breakdown
     )
 
 

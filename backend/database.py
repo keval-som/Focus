@@ -4,17 +4,19 @@ SQLite Database Module for Focus-Aware Browsing Assistant
 This module handles all database operations including:
 - Database initialization and table creation
 - Session management (create, end, retrieve)
-- Log caching and persistence (analytics + cache layer)
+- Tab visit logging for batch processing (raw telemetry)
+- AI batch analysis storage (inference results)
 
-The database serves dual purposes:
-1. Analytics: Track all browsing sessions and alignment analyses
-2. Cache: Store LLM responses to reduce API calls and improve response times
+The database uses a normalized design:
+- logs: Raw telemetry data from frontend
+- ai_batches: AI inference results from batch analysis
 """
 
 import sqlite3
 import uuid
-from datetime import datetime
-from typing import Optional, Dict, Any
+import json
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List
 import os
 
 # Database file path - stored in the project root
@@ -39,9 +41,10 @@ def init_db() -> None:
     Initializes the SQLite database and creates required tables.
     
     This function should be called once at application startup.
-    It creates two tables:
+    It creates three tables:
     - sessions: Stores user browsing sessions with goals
-    - logs: Stores URL analysis results (both as cache and analytics)
+    - logs: Stores raw telemetry data (tab visits)
+    - ai_batches: Stores AI inference results from batch analysis
     
     Note: This function is idempotent - safe to call multiple times.
     """
@@ -60,7 +63,7 @@ def init_db() -> None:
     """)
     
     # Create logs table
-    # Stores URL analysis results - serves as both cache and analytics log
+    # Stores raw tab visit telemetry data (frontend logs)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,13 +71,24 @@ def init_db() -> None:
             url TEXT NOT NULL,
             title TEXT,
             snippet TEXT,
-            aligned BOOLEAN NOT NULL,
-            confidence REAL NOT NULL,
-            reason TEXT NOT NULL,
+            duration_seconds INTEGER NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(session_id),
-            -- Composite unique constraint: one analysis per URL per session
-            UNIQUE(session_id, url)
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+        )
+    """)
+    
+    # Create ai_batches table
+    # Stores AI inference results from batch analysis
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ai_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            focus_score INTEGER NOT NULL,
+            is_on_track BOOLEAN NOT NULL,
+            coaching_nudge TEXT NOT NULL,
+            url_breakdown_json TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
         )
     """)
     
@@ -85,8 +99,13 @@ def init_db() -> None:
     """)
     
     cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_logs_session_url 
-        ON logs(session_id, url)
+        CREATE INDEX IF NOT EXISTS idx_logs_session_created 
+        ON logs(session_id, created_at)
+    """)
+    
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ai_batches_session_created 
+        ON ai_batches(session_id, created_at)
     """)
     
     conn.commit()
@@ -185,21 +204,25 @@ def get_session_goal(session_id: str) -> Optional[str]:
         conn.close()
 
 
-def get_cached_log(session_id: str, url: str) -> Optional[Dict[str, Any]]:
+def log_tab_visit(
+    session_id: str,
+    url: str,
+    title: str,
+    snippet: str,
+    duration_seconds: int
+) -> None:
     """
-    Checks the cache for an existing analysis of a URL within a session.
+    Logs a tab visit to the database for batch processing.
     
-    This function implements the cache layer - if we've analyzed this exact URL
-    for this session before, we can return the cached result instead of calling
-    the LLM API again.
+    This function is designed to be extremely fast - it only writes raw data
+    without any AI analysis. The analysis happens later in batch processing.
     
     Args:
         session_id: The UUID of the session
-        url: The URL to check for cached analysis
-    
-    Returns:
-        Optional[Dict[str, Any]]: Dictionary with keys 'aligned', 'confidence', 'reason'
-                                 if cache hit, None if cache miss
+        url: The visited URL
+        title: The page title
+        snippet: The page snippet/content preview
+        duration_seconds: Time spent on the page in seconds
     
     Raises:
         sqlite3.Error: If database operation fails
@@ -209,64 +232,94 @@ def get_cached_log(session_id: str, url: str) -> Optional[Dict[str, Any]]:
     
     try:
         cursor.execute("""
-            SELECT aligned, confidence, reason
-            FROM logs
-            WHERE session_id = ? AND url = ?
-        """, (session_id, url))
+            INSERT INTO logs 
+            (session_id, url, title, snippet, duration_seconds, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (session_id, url, title, snippet, duration_seconds, datetime.now()))
         
-        row = cursor.fetchone()
-        if row:
-            return {
-                "aligned": bool(row["aligned"]),
-                "confidence": float(row["confidence"]),
-                "reason": str(row["reason"])
-            }
-        return None
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+
+def get_recent_logs(session_id: str, minutes: int = 4) -> list:
+    """
+    Retrieves all logs for a session from the last N minutes.
+    
+    This function is used for batch processing to get recent browsing activity
+    that needs to be analyzed together for better context.
+    
+    Args:
+        session_id: The UUID of the session
+        minutes: Number of minutes to look back (default: 4)
+    
+    Returns:
+        list: List of dictionaries, each containing log data with keys:
+              'id', 'session_id', 'url', 'title', 'snippet', 'duration_seconds', 'created_at'
+    
+    Raises:
+        sqlite3.Error: If database operation fails
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Calculate the timestamp for N minutes ago
+        cutoff_time = datetime.now() - timedelta(minutes=minutes)
+        
+        cursor.execute("""
+            SELECT id, session_id, url, title, snippet, duration_seconds, created_at
+            FROM logs
+            WHERE session_id = ? AND created_at >= ?
+            ORDER BY created_at DESC
+        """, (session_id, cutoff_time))
+        
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
     except sqlite3.Error as e:
         raise e
     finally:
         conn.close()
 
 
-def save_log(
+def save_batch_analysis(
     session_id: str,
-    url: str,
-    title: str,
-    snippet: str,
-    aligned: bool,
-    confidence: float,
-    reason: str
+    focus_score: int,
+    is_on_track: bool,
+    coaching_nudge: str,
+    url_breakdown: List[Dict[str, Any]]
 ) -> None:
     """
-    Saves an analysis result to the logs table.
+    Saves a batch analysis result to the ai_batches table.
     
-    This function serves dual purposes:
-    1. Analytics: Log all analyses for future insights
-    2. Cache: Store results for future cache hits
+    This function stores AI inference results separately from raw telemetry data,
+    following proper database normalization principles.
     
     Args:
         session_id: The UUID of the session
-        url: The analyzed URL
-        title: The page title
-        snippet: The page snippet/content preview
-        aligned: Whether the page aligns with the user's goal (boolean)
-        confidence: Confidence score (0.0 to 1.0)
-        reason: Explanation for the alignment decision
+        focus_score: Focus score from 0-100
+        is_on_track: Boolean indicating if user is staying focused
+        coaching_nudge: Encouraging or corrective message
+        url_breakdown: List of dictionaries, each containing 'url', 'aligned', 'confidence'
     
     Raises:
         sqlite3.Error: If database operation fails
-        sqlite3.IntegrityError: If unique constraint violation (shouldn't happen with proper flow)
     """
     conn = get_connection()
     cursor = conn.cursor()
     
     try:
-        # Use INSERT OR REPLACE to handle potential duplicates gracefully
+        # Convert url_breakdown list to JSON string
+        url_breakdown_json = json.dumps(url_breakdown)
+        
         cursor.execute("""
-            INSERT OR REPLACE INTO logs 
-            (session_id, url, title, snippet, aligned, confidence, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (session_id, url, title, snippet, aligned, confidence, reason, datetime.now()))
+            INSERT INTO ai_batches 
+            (session_id, focus_score, is_on_track, coaching_nudge, url_breakdown_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (session_id, focus_score, is_on_track, coaching_nudge, url_breakdown_json, datetime.now()))
         
         conn.commit()
     except sqlite3.Error as e:
