@@ -1,9 +1,10 @@
 # FastAPI and ASGI server
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
 
 # Data validation and serialization
-pydantic==2.5.0
+# pydantic 2.5.x has no Python 3.13 wheels; 2.10+ does
+pydantic==2.10.6
 
 # Environment variable management
 python-dotenv==1.0.0

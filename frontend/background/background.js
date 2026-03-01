@@ -1,96 +1,203 @@
 // ─────────────────────────────────────────────────────────────
 // Focus Assistant – Background Service Worker (Manifest V3)
 //
-// Stage 3 + 5: Tab Tracking & Page Data Extraction
-//
-// Responsibilities:
-//   • Receive START_SESSION / END_SESSION messages from the popup
-//   • Track time spent per tab during an active session
-//   • Notify content scripts when the active tab changes
-//   • Request page data from content script on tab change
-//   • Build and log an AI-ready payload from extracted page data
-//
-// Future expansions:
-//   • Send payload to AI API for goal-alignment scoring
-//   • Send nudge to content script when user is off-track
+// KEY FIX: MV3 service workers are suspended by Chrome after ~30s
+// of inactivity. All in-memory state is lost on each wakeup.
+// We persist the full session object to chrome.storage.session
+// (which survives SW restarts within the same browser session)
+// and restore it lazily on the first event of each SW activation.
 // ─────────────────────────────────────────────────────────────
 
-/* ── In-memory session state ──────────────────────────────────
-   Service workers can be suspended by Chrome between events.
-   For MVP, in-memory state is sufficient; for production,
-   persist to chrome.storage.session (survives SW restarts). */
-let session = {
-  sessionActive:      false,
-  goal:               "",
-  currentTabId:       null,
-  currentTabStartTime: 0,   // timestamp (ms) when current tab became active
-  alignedTime:        0,    // ms spent on "aligned" tabs (future: AI classified)
-  totalTime:          0,    // ms of total tracked tab time this session
-  driftCount:         0,    // number of tab switches during session
+// ─── Backend configuration ────────────────────────────────────
+const BACKEND_URL = "http://localhost:8000";
+const EXTENSION_KEY = "hackathon-focus-123"; // must match EXTENSION_SECRET_KEY in .env
+
+/**
+ * Fire-and-forget authenticated POST to the backend.
+ * Returns parsed JSON, or null on any error (extension keeps working offline).
+ */
+async function callBackend(path, body) {
+  try {
+    const res = await fetch(`${BACKEND_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Extension-Key": EXTENSION_KEY,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      console.warn(`[Focus] Backend ${path} → HTTP ${res.status}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn(`[Focus] Backend ${path} failed:`, err.message);
+    return null;
+  }
+}
+
+// ─── Session state ─────────────────────────────────────────────
+// In-memory copy; authoritative source is chrome.storage.session.
+const DEFAULT_SESSION = {
+  sessionActive: false,
+  goal: "",
+  sessionId: null,
+  currentTabId: null,
+  currentTabStartTime: 0,
+  chromeFocused: true,
+  alignedTime: 0,
+  totalTime: 0,
+  driftCount: 0,
+  tabTimes: {},   // { [tabId]: accumulatedMs }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────
+let session = { ...DEFAULT_SESSION };
 
-/* Calculate time elapsed on the previous tab and add it to totalTime. */
+// ─── Service-worker persistence ────────────────────────────────
+// Chrome.storage.session persists across SW restarts but is cleared
+// when the browser exits. Perfect for tracking an active session.
+
+/**
+ * Restore session from chrome.storage.session.
+ * Called once per SW activation before any event is processed.
+ * If the SW was sleeping, we reset currentTabStartTime to now so
+ * we don't count the time Chrome had the SW suspended.
+ */
+let _sessionRestored = false;
+const _sessionRestorePromise = chrome.storage.session
+  .get("focusSession")
+  .then((data) => {
+    if (data.focusSession) {
+      session = data.focusSession;
+
+      // SW was sleeping — we don't know how long, so restart the
+      // timer from now rather than counting suspended time.
+      if (session.sessionActive && session.currentTabId !== null) {
+        session.currentTabStartTime = Date.now();
+        console.log("[Focus] SW woke up — resuming session, timer restarted.");
+      }
+    }
+    _sessionRestored = true;
+    console.log("[Focus] Session restored from storage:", session.sessionActive);
+  });
+
+/** Persist current session to chrome.storage.session. */
+function saveSession() {
+  chrome.storage.session.set({ focusSession: session });
+}
+
+/** Wait for session restoration, then run fn(). */
+async function withSession(fn) {
+  await _sessionRestorePromise;
+  return fn();
+}
+
+// ─── Helpers ───────────────────────────────────────────────────
+
+/**
+ * Commit time elapsed since currentTabStartTime into tabTimes/totalTime,
+ * notify the outgoing content script to pause its timer,
+ * then null out currentTabStartTime so double-calls are safe.
+ */
 function closePreviousTab() {
   if (session.currentTabId === null || session.currentTabStartTime === 0) return;
 
   const elapsed = Date.now() - session.currentTabStartTime;
   session.totalTime += elapsed;
+  session.tabTimes[session.currentTabId] =
+    (session.tabTimes[session.currentTabId] || 0) + elapsed;
 
   console.log(
-    `[Focus] Tab closed — tabId: ${session.currentTabId} | elapsed: ${(elapsed / 1000).toFixed(1)}s | totalTime: ${(session.totalTime / 1000).toFixed(1)}s`
+    `[Focus] Tab closed — tabId: ${session.currentTabId}` +
+    ` | elapsed: ${(elapsed / 1000).toFixed(1)}s` +
+    ` | accumulated: ${((session.tabTimes[session.currentTabId]) / 1000).toFixed(1)}s` +
+    ` | totalTime: ${(session.totalTime / 1000).toFixed(1)}s`
   );
+
+  chrome.tabs.sendMessage(session.currentTabId, { type: "TAB_DEACTIVATED" })
+    .catch(() => { });
+
+  session.currentTabStartTime = 0; // make double-call safe
 }
 
-/* Begin timing a new tab, notify its content script, and request page data. */
-function openNewTab(tabId) {
-  session.currentTabId        = tabId;
+/**
+ * Begin timing a new tab.
+ * Sends TAB_CHANGED with accumulated seconds so the content script
+ * can resume the visual timer from the right value.
+ *
+ * @param {number}  tabId
+ * @param {boolean} [delayMessage=false] – true after onUpdated (page nav)
+ *   so the freshly-injected content script has time to register its listener.
+ */
+function openNewTab(tabId, delayMessage = false) {
+  session.currentTabId = tabId;
   session.currentTabStartTime = Date.now();
-  session.driftCount         += 1;
+  session.driftCount += 1;
 
   console.log(`[Focus] Tab opened — tabId: ${tabId} | goal: "${session.goal}"`);
 
-  // Send TAB_CHANGED directly — no chrome.tabs.get wrapper needed.
-  // chrome:// and other restricted pages simply have no content script,
-  // so the message fails silently via .catch().
-  chrome.tabs.sendMessage(tabId, {
-    type: "TAB_CHANGED",
-    goal: session.goal,
-  }).catch(() => {});
+  const accumulatedMs = session.tabTimes[tabId] || 0;
+  const accumulatedSecs = Math.floor(accumulatedMs / 1000);
 
-  // Request page data extraction; callback handles both success and failure.
-  chrome.tabs.sendMessage(tabId, { type: "EXTRACT_PAGE_DATA" }, (response) => {
-    // Suppress the "no receiver" error for tabs without a content script
+  const sendTabChanged = () => {
+    chrome.tabs.sendMessage(tabId, {
+      type: "TAB_CHANGED",
+      goal: session.goal,
+      accumulatedSeconds: accumulatedSecs,
+    }).catch(() => { });
+  };
+
+  // After a page navigation the content script is freshly injected.
+  // Wait 200ms to give it time to register its message listener.
+  if (delayMessage) {
+    setTimeout(sendTabChanged, 200);
+  } else {
+    sendTabChanged();
+  }
+
+  // Request page data for AI alignment analysis
+  chrome.tabs.sendMessage(tabId, { type: "EXTRACT_PAGE_DATA" }, async (response) => {
     void chrome.runtime.lastError;
-
     if (!response) return;
 
     const { url, title, snippet } = response.data ?? {};
 
-    const aiPayload = {
-      goal:      session.goal,
-      url,
-      title,
-      snippet,
-      timeSpent: Math.round(session.totalTime / 1000), // ms → seconds
-    };
+    console.log("[Focus] AI payload:", { goal: session.goal, url, title });
 
-    console.log("[Focus] AI payload ready:", aiPayload);
+    // POST to backend for AI alignment scoring
+    if (session.sessionId && url) {
+      const result = await callBackend("/api/v1/session/analyze", {
+        session_id: session.sessionId,
+        url: url ?? "",
+        title: title ?? "",
+        snippet: snippet ?? "",
+      });
 
-    // TODO (Stage 6): POST aiPayload to AI alignment API
+      if (result) {
+        console.log("[Focus] Alignment result:", result);
+        chrome.storage.local.set({
+          lastAnalysis: {
+            aligned: result.aligned,
+            confidence: result.confidence,
+            reason: result.reason,
+            cached: result.cached,
+            url,
+          },
+        });
+      }
+    }
   });
 }
 
-/* Persist key counters back to chrome.storage so the popup can read them. */
+/** Flush counters + persist full session so SW can restore after sleep. */
 function flushToStorage() {
   chrome.storage.local.set({
-    totalTime:   session.totalTime,
+    totalTime: session.totalTime,
     alignedTime: session.alignedTime,
-    driftCount:  session.driftCount,
+    driftCount: session.driftCount,
   });
+  saveSession(); // persist full session for SW restart recovery
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -98,45 +205,62 @@ function flushToStorage() {
 // ─────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
+  // ── START SESSION ─────────────────────────────────────────
   if (message.type === "START_SESSION") {
-    // Query the currently active tab so we can start timing it immediately
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, async ([tab]) => {
+      await _sessionRestorePromise;
+
       session = {
-        sessionActive:       true,
-        goal:                message.goal ?? "",
-        currentTabId:        tab?.id ?? null,
+        ...DEFAULT_SESSION,
+        sessionActive: true,
+        goal: message.goal ?? "",
+        currentTabId: tab?.id ?? null,
         currentTabStartTime: Date.now(),
-        alignedTime:         0,
-        totalTime:           0,
-        driftCount:          0,
       };
+
+      // Create backend session
+      const data = await callBackend("/api/v1/session/start", { goal: session.goal });
+      if (data?.session_id) {
+        session.sessionId = data.session_id;
+        console.log(`[Focus] Backend session: ${session.sessionId}`);
+      } else {
+        console.warn("[Focus] Backend offline — session tracking only locally.");
+      }
+
+      chrome.storage.local.set({
+        sessionId: session.sessionId,
+        backendOnline: !!data?.session_id,
+      });
 
       console.log(`[Focus] Session started — goal: "${session.goal}" | tabId: ${session.currentTabId}`);
       flushToStorage();
       sendResponse({ ok: true });
     });
 
-    return true; // keep message channel open for async sendResponse
+    return true; // keep channel open for async sendResponse
   }
 
+  // ── END SESSION ───────────────────────────────────────────
   if (message.type === "END_SESSION") {
-    if (session.sessionActive) {
-      closePreviousTab();         // account for time on the last tab
-      flushToStorage();
-    }
+    (async () => {
+      await _sessionRestorePromise;
 
-    session = {
-      sessionActive:       false,
-      goal:                "",
-      currentTabId:        null,
-      currentTabStartTime: 0,
-      alignedTime:         0,
-      totalTime:           0,
-      driftCount:          0,
-    };
+      if (session.sessionActive) {
+        closePreviousTab();
+        flushToStorage();
+        if (session.sessionId) {
+          callBackend("/api/v1/session/end", { session_id: session.sessionId });
+        }
+      }
 
-    console.log("[Focus] Session ended.");
-    sendResponse({ ok: true });
+      session = { ...DEFAULT_SESSION };
+      saveSession();
+      chrome.storage.local.remove(["sessionId", "lastAnalysis", "backendOnline"]);
+      console.log("[Focus] Session ended.");
+      sendResponse({ ok: true });
+    })();
+
+    return true;
   }
 
 });
@@ -145,24 +269,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // Tab lifecycle listeners
 // ─────────────────────────────────────────────────────────────
 
-/* User switches to a different tab. */
+/** User switches to a different tab inside Chrome. */
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  if (!session.sessionActive) return;
-
-  closePreviousTab();
-  openNewTab(tabId);
-  flushToStorage();
+  withSession(() => {
+    if (!session.sessionActive) return;
+    closePreviousTab();
+    openNewTab(tabId, false);
+    flushToStorage();
+  });
 });
 
-/* A tab finishes loading a new URL (navigation within same tab). */
+/**
+ * A tab finishes loading a new URL (navigation or revisit).
+ * We delay TAB_CHANGED by 200ms so the freshly-injected content
+ * script has time to register its listener.
+ */
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (!session.sessionActive)          return;
-  if (changeInfo.status !== "complete") return;
-  if (tabId !== session.currentTabId)   return; // only care about the active tab
+  withSession(() => {
+    if (!session.sessionActive) return;
+    if (changeInfo.status !== "complete") return;
+    if (tabId !== session.currentTabId) return;
 
-  // Treat an in-tab navigation as a "new" tab event — reset the timer
-  // so we measure time on this specific URL, not the tab's total lifetime.
-  closePreviousTab();
-  openNewTab(tabId);
-  flushToStorage();
+    closePreviousTab();
+    openNewTab(tabId, true /* delayMessage */);
+    flushToStorage();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Window focus tracking — pause timer when user leaves Chrome
+// ─────────────────────────────────────────────────────────────
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  withSession(() => {
+    if (!session.sessionActive) return;
+
+    const chromeLostFocus = (windowId === chrome.windows.WINDOW_ID_NONE);
+
+    if (chromeLostFocus && session.chromeFocused) {
+      session.chromeFocused = false;
+      closePreviousTab();
+      if (session.currentTabId !== null) {
+        chrome.tabs.sendMessage(session.currentTabId, { type: "TAB_DEACTIVATED" })
+          .catch(() => { });
+      }
+      session.currentTabId = null;
+      flushToStorage();
+      console.log("[Focus] Chrome lost focus — timer paused.");
+
+    } else if (!chromeLostFocus && !session.chromeFocused) {
+      session.chromeFocused = true;
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        if (!tab) return;
+        openNewTab(tab.id, false);
+        flushToStorage();
+        console.log("[Focus] Chrome regained focus — timer resumed on tabId:", tab.id);
+      });
+    }
+  });
 });

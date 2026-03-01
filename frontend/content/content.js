@@ -16,8 +16,8 @@
   if (document.getElementById("focus-assistant-bar")) return;
 
   // ── Timer state ────────────────────────────────────────────
-  let timerInterval  = null;  // setInterval handle
-  let secondsOnTab   = 0;     // seconds elapsed on this tab since TAB_CHANGED
+  let timerInterval = null;  // setInterval handle
+  let secondsOnTab = 0;     // seconds elapsed on this tab since TAB_CHANGED
 
   // ── Helpers ────────────────────────────────────────────────
 
@@ -28,17 +28,20 @@
     return `${m}:${s}`;
   }
 
-  /** Stop any running timer and reset the counter. */
+  /** Stop any running timer and clear the count unless intentionally pausing. */
   function resetTimer() {
     clearInterval(timerInterval);
     timerInterval = null;
-    secondsOnTab  = 0;
+    secondsOnTab = 0;
     timerEl.textContent = "⏱ 00:00";
   }
 
   /** Start the per-tab timer — increments every second. */
-  function startTimer() {
-    resetTimer();
+  function startTimer(initialSeconds = 0) {
+    clearInterval(timerInterval); // ensure no double intervals
+    secondsOnTab = initialSeconds;
+    timerEl.textContent = `⏱ ${fmt(secondsOnTab)}`;
+
     timerInterval = setInterval(() => {
       secondsOnTab += 1;
       timerEl.textContent = `⏱ ${fmt(secondsOnTab)}`;
@@ -51,44 +54,44 @@
   const bar = document.createElement("div");
   bar.id = "focus-assistant-bar";
   Object.assign(bar.style, {
-    position:        "fixed",
-    top:             "0",
-    left:            "0",
-    width:           "100%",
-    height:          "45px",
-    zIndex:          "2147483647",
-    display:         "flex",
-    alignItems:      "center",
-    gap:             "0",
-    padding:         "0 16px",
-    background:      "linear-gradient(90deg, #4f46e5, #6366f1)",
-    color:           "#ffffff",
-    fontFamily:      "'Segoe UI', system-ui, sans-serif",
-    fontSize:        "13px",
-    fontWeight:      "500",
-    boxShadow:       "0 2px 10px rgba(0,0,0,0.4)",
-    boxSizing:       "border-box",
-    letterSpacing:   "0.2px",
+    position: "fixed",
+    top: "0",
+    left: "0",
+    width: "100%",
+    height: "45px",
+    zIndex: "2147483647",
+    display: "flex",
+    alignItems: "center",
+    gap: "0",
+    padding: "0 16px",
+    background: "linear-gradient(90deg, #4f46e5, #6366f1)",
+    color: "#ffffff",
+    fontFamily: "'Segoe UI', system-ui, sans-serif",
+    fontSize: "13px",
+    fontWeight: "500",
+    boxShadow: "0 2px 10px rgba(0,0,0,0.4)",
+    boxSizing: "border-box",
+    letterSpacing: "0.2px",
   });
 
   /* Goal pill — left side */
   const goalEl = document.createElement("span");
   goalEl.id = "fa-goal";
   Object.assign(goalEl.style, {
-    flex:           "1",
-    overflow:       "hidden",
-    textOverflow:   "ellipsis",
-    whiteSpace:     "nowrap",
+    flex: "1",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   });
   goalEl.textContent = "🎯 Goal: —";
 
   /* Divider */
   const div1 = document.createElement("span");
   Object.assign(div1.style, {
-    width:      "1px",
-    height:     "18px",
+    width: "1px",
+    height: "18px",
     background: "rgba(255,255,255,0.3)",
-    margin:     "0 14px",
+    margin: "0 14px",
     flexShrink: "0",
   });
 
@@ -98,7 +101,7 @@
   timerEl.textContent = "⏱ 00:00";
   Object.assign(timerEl.style, {
     fontVariantNumeric: "tabular-nums",
-    flexShrink:         "0",
+    flexShrink: "0",
   });
 
   /* Divider */
@@ -108,15 +111,15 @@
   const statusEl = document.createElement("span");
   statusEl.id = "fa-status";
   Object.assign(statusEl.style, {
-    flexShrink:   "0",
-    padding:      "2px 10px",
+    flexShrink: "0",
+    padding: "2px 10px",
     borderRadius: "20px",
-    fontSize:     "11px",
-    fontWeight:   "700",
-    letterSpacing:"0.5px",
-    textTransform:"uppercase",
-    background:   "rgba(255,255,255,0.15)",
-    border:       "1px solid rgba(255,255,255,0.25)",
+    fontSize: "11px",
+    fontWeight: "700",
+    letterSpacing: "0.5px",
+    textTransform: "uppercase",
+    background: "rgba(255,255,255,0.15)",
+    border: "1px solid rgba(255,255,255,0.25)",
   });
   statusEl.textContent = "Inactive";
 
@@ -125,15 +128,15 @@
   dismissBtn.textContent = "✕";
   dismissBtn.title = "Dismiss for this page";
   Object.assign(dismissBtn.style, {
-    marginLeft:  "14px",
-    flexShrink:  "0",
-    background:  "transparent",
-    border:      "none",
-    color:       "rgba(255,255,255,0.7)",
-    fontSize:    "15px",
-    cursor:      "pointer",
-    lineHeight:  "1",
-    padding:     "0",
+    marginLeft: "14px",
+    flexShrink: "0",
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.7)",
+    fontSize: "15px",
+    cursor: "pointer",
+    lineHeight: "1",
+    padding: "0",
   });
   dismissBtn.addEventListener("click", () => {
     clearInterval(timerInterval);
@@ -151,30 +154,59 @@
    */
   function applyState({ goal, sessionActive }) {
     if (sessionActive && goal) {
-      goalEl.textContent    = `🎯 Goal: ${goal}`;
-      statusEl.textContent  = "Active";
+      goalEl.textContent = `🎯 Goal: ${goal}`;
+      // Status badge — will be overwritten by applyAnalysis when a result arrives
+      statusEl.textContent = "Active";
       statusEl.style.background = "rgba(34,197,94,0.25)";
-      statusEl.style.border     = "1px solid rgba(34,197,94,0.5)";
-      statusEl.style.color      = "#86efac";
-      if (!timerInterval) startTimer(); // only start if not already running
+      statusEl.style.border = "1px solid rgba(34,197,94,0.5)";
+      statusEl.style.color = "#86efac";
+      if (!timerInterval) startTimer(secondsOnTab);
     } else {
-      goalEl.textContent    = "🎯 Goal: —";
-      statusEl.textContent  = "Inactive";
+      goalEl.textContent = "🎯 Goal: —";
+      statusEl.textContent = "Inactive";
       statusEl.style.background = "rgba(255,255,255,0.1)";
-      statusEl.style.border     = "1px solid rgba(255,255,255,0.2)";
-      statusEl.style.color      = "#ffffff";
+      statusEl.style.border = "1px solid rgba(255,255,255,0.2)";
+      statusEl.style.color = "#ffffff";
+      statusEl.title = "";
       resetTimer();
     }
   }
 
-  // ── 1. Read state immediately on page load ─────────────────
-  chrome.storage.local.get(["goal", "sessionActive"], applyState);
+  /** Update the status badge to reflect the latest AI alignment result. */
+  function applyAnalysis({ lastAnalysis }) {
+    if (!lastAnalysis) return;
+    // Only apply if this analysis is for the current page
+    const currentUrl = window.location.origin + window.location.pathname;
+    if (!lastAnalysis.url || !lastAnalysis.url.startsWith(currentUrl)) return;
 
-  // ── 2. React to session start / end from the popup ─────────
-  // chrome.storage.onChanged fires on all tabs — no extra messaging needed.
+    if (lastAnalysis.aligned) {
+      statusEl.textContent = "✅ Aligned";
+      statusEl.style.background = "rgba(34,197,94,0.25)";
+      statusEl.style.border = "1px solid rgba(34,197,94,0.5)";
+      statusEl.style.color = "#86efac";
+    } else {
+      statusEl.textContent = "⚠️ Drifting";
+      statusEl.style.background = "rgba(239,68,68,0.25)";
+      statusEl.style.border = "1px solid rgba(239,68,68,0.5)";
+      statusEl.style.color = "#fca5a5";
+    }
+    // Show reason as a tooltip
+    statusEl.title = lastAnalysis.reason ?? "";
+  }
+
+  // ── 1. Read state on page load ─────────────────────────────
+  chrome.storage.local.get(["goal", "sessionActive", "lastAnalysis"], (data) => {
+    applyState(data);
+    applyAnalysis(data);
+  });
+
+  // ── 2. React to session start / end, and analysis updates ──
   chrome.storage.onChanged.addListener((_, area) => {
     if (area !== "local") return;
-    chrome.storage.local.get(["goal", "sessionActive"], applyState);
+    chrome.storage.local.get(["goal", "sessionActive", "lastAnalysis"], (data) => {
+      applyState(data);
+      applyAnalysis(data);
+    });
   });
 
   // ── Page data extraction (privacy-safe) ───────────────────
@@ -212,7 +244,7 @@
 
         // Channel name as extra context
         const channelEl = document.querySelector("#channel-name a") ||
-                          document.querySelector("ytd-channel-name a");
+          document.querySelector("ytd-channel-name a");
         const channel = channelEl?.textContent?.trim() || "";
 
         const snippet = [channel && `Channel: ${channel}`, desc].filter(Boolean).join(" | ");
@@ -256,13 +288,13 @@
   ];
 
   function extractPageData() {
-    const hostname  = window.location.hostname;
+    const hostname = window.location.hostname;
     const isPrivate = PRIVATE_DOMAINS.some((d) => hostname.includes(d));
 
     if (isPrivate) {
       return {
-        url:     window.location.origin + window.location.pathname,
-        title:   document.title,
+        url: window.location.origin + window.location.pathname,
+        title: document.title,
         snippet: "[content redacted]",
         private: true,
       };
@@ -283,13 +315,13 @@
       .forEach((el) => el.remove());
 
     const nodes = clone.querySelectorAll("h1, h2, h3, main, article, [role='main'], p");
-    const text  = nodes.length
+    const text = nodes.length
       ? [...nodes].map((n) => n.innerText).join(" ")
       : clone.innerText;
 
     return {
-      url:     safeUrl,
-      title:   document.title,
+      url: safeUrl,
+      title: document.title,
       snippet: text.replace(/\s+/g, " ").trim().slice(0, 400),
       private: false,
     };
@@ -298,10 +330,16 @@
   // ── 3. React to messages from the background ───────────────
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
-    // TAB_CHANGED — update the bar goal text and reset the timer
+    // TAB_CHANGED — update the bar goal text and reset/resume the timer
     if (message.type === "TAB_CHANGED") {
       goalEl.textContent = `🎯 Goal: ${message.goal ?? "—"}`;
-      startTimer();
+      startTimer(message.accumulatedSeconds || 0);
+    }
+
+    // TAB_DEACTIVATED — pause the visual timer on this page
+    if (message.type === "TAB_DEACTIVATED") {
+      clearInterval(timerInterval);
+      timerInterval = null;
     }
 
     // EXTRACT_PAGE_DATA — scrape this page and send privacy-safe data to background

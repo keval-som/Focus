@@ -1,36 +1,46 @@
 import React, { useState, useEffect } from "react";
 
-export default function App() {
-  const [goal, setGoal]               = useState("");
-  const [sessionActive, setSessionActive] = useState(false);
-  const [savedGoal, setSavedGoal]     = useState("");
+const BACKEND_URL = "http://localhost:8000";
 
-  // On popup open, read existing session state from storage
+export default function App() {
+  const [goal, setGoal] = useState("");
+  const [sessionActive, setSessionActive] = useState(false);
+  const [savedGoal, setSavedGoal] = useState("");
+  const [backendOnline, setBackendOnline] = useState(null); // null=checking, true, false
+
+  // ── On popup open: restore session state + check backend health ──
   useEffect(() => {
-    chrome.storage.local.get(["goal", "sessionActive"], (data) => {
+    chrome.storage.local.get(["goal", "sessionActive", "backendOnline"], (data) => {
       if (data.sessionActive) {
         setSessionActive(true);
         setSavedGoal(data.goal || "");
         setGoal(data.goal || "");
       }
     });
+
+    // Ping the backend health endpoint
+    fetch(`${BACKEND_URL}/health`)
+      .then((r) => setBackendOnline(r.ok))
+      .catch(() => setBackendOnline(false));
   }, []);
 
   const handleStartSession = () => {
     const trimmed = goal.trim();
     if (!trimmed) return;
 
-    // 1. Write session state to storage (content script reads this on page load)
     chrome.storage.local.set({
-      goal:          trimmed,
+      goal: trimmed,
       sessionActive: true,
-      startTime:     Date.now(),
-      alignedTime:   0,
-      driftCount:    0,
+      startTime: Date.now(),
+      alignedTime: 0,
+      driftCount: 0,
     }, () => {
-      // 2. Tell the background service worker to start tab tracking
-      chrome.runtime.sendMessage({ type: "START_SESSION", goal: trimmed }, () => {
-        void chrome.runtime.lastError; // suppress if SW is waking up
+      chrome.runtime.sendMessage({ type: "START_SESSION", goal: trimmed }, (resp) => {
+        void chrome.runtime.lastError;
+        // After start, re-check backend status from storage
+        chrome.storage.local.get("backendOnline", (d) => {
+          if (d.backendOnline !== undefined) setBackendOnline(d.backendOnline);
+        });
       });
 
       console.log("[Focus] Session started with goal:", trimmed);
@@ -40,9 +50,7 @@ export default function App() {
   };
 
   const handleEndSession = () => {
-    // 1. Update storage so all content scripts drop back to "Goal: None"
     chrome.storage.local.set({ sessionActive: false }, () => {
-      // 2. Tell the background service worker to stop tracking
       chrome.runtime.sendMessage({ type: "END_SESSION" }, () => {
         void chrome.runtime.lastError;
       });
@@ -54,6 +62,16 @@ export default function App() {
     });
   };
 
+  // Backend status label
+  const backendLabel =
+    backendOnline === null ? "Checking…" :
+      backendOnline ? "Backend ✅" :
+        "Backend ✖ Offline";
+  const backendColor =
+    backendOnline === null ? "#aaa" :
+      backendOnline ? "#86efac" :
+        "#fca5a5";
+
   return (
     <div className="popup-container">
 
@@ -61,9 +79,20 @@ export default function App() {
       <header className="popup-header">
         <span className="logo">🎯</span>
         <h1>Focus Assistant</h1>
-        {/* Live session indicator dot */}
         <span className={`status-dot ${sessionActive ? "active" : ""}`} />
       </header>
+
+      {/* ── Backend status pill ── */}
+      <div style={{
+        textAlign: "center",
+        fontSize: "11px",
+        fontWeight: 600,
+        color: backendColor,
+        margin: "0 0 6px",
+        letterSpacing: "0.4px",
+      }}>
+        {backendLabel}
+      </div>
 
       {/* ── Active session banner ── */}
       {sessionActive && (
@@ -85,7 +114,6 @@ export default function App() {
           placeholder="Enter your goal"
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
-          // Allow pressing Enter to start session
           onKeyDown={(e) => e.key === "Enter" && handleStartSession()}
           disabled={sessionActive}
         />
