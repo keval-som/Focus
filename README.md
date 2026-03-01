@@ -86,7 +86,8 @@ npm run build      # one-time production build
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/session/start` | POST | Start session with a goal |
-| `/api/v1/session/analyze` | POST | Check URL alignment |
+| `/api/v1/session/log` | POST | Log a tab visit (fast, no AI) |
+| `/api/v1/session/analyze_batch` | POST | Batch analyze activity (AI every 4 min) |
 | `/api/v1/session/end` | POST | End session |
 | `/health` | GET | Health check |
 
